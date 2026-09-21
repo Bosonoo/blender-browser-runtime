@@ -4,3 +4,4 @@ build/
 downloads/
 source.tar.gz
 *.tar.gz
+.tmp/

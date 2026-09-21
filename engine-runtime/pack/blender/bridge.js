@@ -220,6 +220,7 @@
     var opts = options || {};
     var files = new Map();
     var dirs = new Map();
+    var readOnly = new Set();
     dirs.set('', true);
     var openKey = '';
 
@@ -286,6 +287,7 @@
       },
       writeFile: function (path, data) {
         try {
+          if (readOnly.has(normaliseKey(path))) throw new Error('This pack file is read-only.');
           noteWrite(putFile(path, data));
           return Promise.resolve(undefined);
         } catch (err) {
@@ -298,12 +300,14 @@
         return Promise.resolve(undefined);
       },
       unlink: function (path) {
+        if (readOnly.has(normaliseKey(path))) return Promise.reject(new Error('This pack file is read-only.'));
         files.delete(normaliseKey(path));
         return Promise.resolve(undefined);
       },
       rename: function (from, to) {
         var a = normaliseKey(from);
         var b = normaliseKey(to);
+        if (readOnly.has(a) || readOnly.has(b)) return Promise.reject(new Error('This pack file is read-only.'));
         if (!files.has(a)) return Promise.reject(new Error('bosonoo-fs: no such file'));
         if (a === b) return Promise.resolve(undefined);
         var bytes = files.get(a);
@@ -322,6 +326,13 @@
       files: files,
       dirs: dirs,
       putFile: putFile,
+      putReadOnly: function (path, data) { var key = putFile(path, data); readOnly.add(key); },
+      releaseCommandBuffers: function (id) {
+        if (!/^[A-Za-z0-9_-]{1,96}$/.test(id || '')) throw new Error('Invalid command buffer identity.');
+        ['automation/assets/' + id + '.png', 'automation/outputs/' + id + '.glb'].forEach(function (key) {
+          files.delete(key); readOnly.delete(key);
+        });
+      },
       setOpenKey: function (key) { openKey = normaliseKey(key); },
       openKey: function () { return openKey; },
       read: function (key) { return files.get(normaliseKey(key)) || null; }
@@ -424,6 +435,10 @@
   state.editorReadyReporting = false;
   state.cloudSaveError = false;
   state.uncertainSnapshot = null;
+  state.commandProtocol = false;
+  state.commandBusy = false;
+  state.commandTimer = null;
+  state.lastSnapshotOutcome = null;
 
   function log() {
     var parts = Array.prototype.slice.call(arguments).map(String);
@@ -956,7 +971,7 @@
         fail('failed', 'Protocol error', 'The broker sent a frame without a type.');
         return;
       }
-      if (message.type === 'hydrate.chunk') {
+      if (message.type === 'hydrate.chunk' || message.type === 'command.asset.chunk') {
         state.expectBinaryFor = message;
         return;
       }
@@ -999,7 +1014,7 @@
       var opened = false;
       ws.onopen = function () {
         opened = true;
-        exchange({ type: 'engine.connect', grant: grant, protocol: PROTOCOL, editor_ready_reporting: true }, ['engine.connected'], CONNECT_TIMEOUT_MS)
+        exchange({ type: 'engine.connect', grant: grant, protocol: PROTOCOL, editor_ready_reporting: true, command_protocol: 1 }, ['engine.connected'], CONNECT_TIMEOUT_MS)
           .then(function (reply) {
             grant = '';
             var m = reply.message;
@@ -1024,6 +1039,8 @@
               state.recoveryPage = m;
               state.saveTarget = readSaveTarget(m.save_target);
               state.editorReadyReporting = m.editor_ready_reporting === true;
+              state.commandProtocol = m.command_protocol === 1;
+              state.commandWindow = state.commandProtocol ? String(m.window_id || '') : '';
               try { document.title = state.session.project_name + ' — Bosonoo Blender (alpha)'; } catch (err) { /* ignore */ }
               setPhase('connected');
               startPing();
@@ -1206,6 +1223,182 @@
   }
 
   // --- 6. launch -----------------------------------------------------------
+  function prepareAutomation() {
+    if (!state.commandProtocol) return Promise.resolve();
+    if (!state.commandWindow || typeof fetch !== 'function') return Promise.reject(new Error('The engine command handshake is incomplete.'));
+    return fetch(new URL('bosonoo/automation.py', window.location.href).href,
+      { credentials: 'omit', cache: 'force-cache', redirect: 'error' }).then(function (response) {
+      if (!response.ok) throw new Error('The qualified Blender command adapter is missing.');
+      return response.arrayBuffer();
+    }).then(function (buffer) {
+      if (state.terminal || buffer.byteLength < 100 || buffer.byteLength > 64 * 1024) throw new Error('The Blender command adapter could not be loaded.');
+      memfs.putReadOnly('automation/bootstrap.py', new Uint8Array(buffer));
+      // Only this manifest-pinned pack script runs. Uploaded scripts remain off.
+      state.bargs = Object.freeze(['--disable-autoexec', MOUNT_PATH + '/' + memfs.openKey(),
+        '--python', MOUNT_PATH + '/automation/bootstrap.py']);
+      state.commandTimer = setInterval(pollCommand, 1000);
+    });
+  }
+
+  function mailboxResult(commandId, deadline) {
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (state.terminal) { reject(new Error('ENGINE_DISCONNECTED')); return; }
+        var raw = memfs.read('automation/outbox.json');
+        if (raw && raw.length <= 64 * 1024) {
+          try {
+            var value = JSON.parse(new TextDecoder().decode(raw));
+            if (value.command_id === commandId) { resolve(value); return; }
+          } catch (err) { /* A partial native write is not a result. */ }
+        }
+        if (Date.now() > deadline) { reject(new Error('ENGINE_COMMAND_OUTCOME_UNKNOWN')); return; }
+        setTimeout(poll, 100);
+      })();
+    });
+  }
+
+  function prepareCommandAsset(command) {
+    if (command.action !== 'blender.image.import') return Promise.resolve();
+    var asset = command.asset;
+    if (!asset || asset.mime !== 'image/png' || !/^[A-Za-z0-9_-]{1,96}$/.test(asset.key || '')
+        || !Number.isSafeInteger(asset.bytes) || asset.bytes < 8 || asset.bytes > 8 * 1024 * 1024
+        || !/^[0-9a-f]{64}$/.test(asset.sha256 || '') || asset.key !== command.command_id || command.params.asset_key !== asset.key
+        || command.params.sha256 !== asset.sha256) return Promise.reject(new Error('ENGINE_ASSET_INVALID'));
+    var bytes = new Uint8Array(asset.bytes);
+    var offset = 0;
+    function read() {
+      return exchange({ type: 'command.asset.read', command_id: command.command_id, claim_token: command.claim_token,
+        offset: offset, max_bytes: Math.min(256 * 1024, bytes.length - offset) }, ['command.asset.chunk']).then(function (reply) {
+        var m = reply.message;
+        if (m.offset !== offset || m.sha256 !== asset.sha256 || !reply.bytes || m.size !== reply.bytes.length
+            || m.size < 1 || m.size > 256 * 1024 || offset + m.size > bytes.length
+            || m.eof !== (offset + m.size === bytes.length)) throw new Error('ENGINE_ASSET_CHANGED');
+        bytes.set(reply.bytes, offset); offset += m.size;
+        if (offset < bytes.length) return read();
+        return sha256Hex(bytes).then(function (digest) {
+          if (digest !== asset.sha256 || Array.from(bytes.slice(0, 8)).join(',') !== '137,80,78,71,13,10,26,10') throw new Error('ENGINE_ASSET_DIGEST_MISMATCH');
+          memfs.putReadOnly('automation/assets/' + asset.key + '.png', bytes);
+        });
+      });
+    }
+    return read();
+  }
+
+  function saveCommandChanges(deadline, command) {
+    return new Promise(function (resolve, reject) {
+      if (!state.autosave || !moduleValue) { reject(new Error('NATIVE_SAVE_UNAVAILABLE')); return; }
+      try {
+        if (moduleValue.ccall('blender_bosonoo_save_current', 'number', [], []) !== 1) throw new Error('Native save refused');
+      } catch (error) { reject(error); return; }
+      (function poll() {
+        if (state.terminal || Date.now() > deadline) { reject(new Error('SAVE_OUTCOME_UNKNOWN')); return; }
+        var status;
+        try { status = moduleValue.ccall('blender_bosonoo_autosave_status', 'number', [], []); }
+        catch (error) { reject(error); return; }
+        if (status === 6 || status === 7) { reject(new Error('NATIVE_SAVE_FAILED')); return; }
+        if (status !== 2 || state.saving || state.waiter) { setTimeout(poll, 100); return; }
+        if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+        Promise.resolve(requestSnapshot(command)).then(function (outcome) {
+          if (!outcome || outcome.type !== 'snapshot.saved') throw new Error('SAVE_UNCONFIRMED');
+          resolve(outcome);
+        }).catch(reject);
+      })();
+    });
+  }
+
+  function stageCommandOutput(command, value) {
+    if (command.action !== 'blender.scene.export_glb' || value.ok !== true) return Promise.resolve(value);
+    var output = value.data && value.data.output;
+    if (!output || output.key !== command.command_id || output.mime !== 'model/gltf-binary'
+        || !Number.isSafeInteger(output.bytes) || output.bytes < 20 || output.bytes > 8 * 1024 * 1024
+        || !/^[0-9a-f]{64}$/.test(output.sha256 || '')) return Promise.reject(new Error('ENGINE_OUTPUT_INVALID'));
+    var bytes = memfs.read('automation/outputs/' + command.command_id + '.glb');
+    if (!bytes || bytes.length !== output.bytes) return Promise.reject(new Error('ENGINE_OUTPUT_MISSING'));
+    var offset = 0;
+    function chunk() {
+      var end = Math.min(offset + 256 * 1024, bytes.length);
+      var promise = expect(['command.output.progress']);
+      send({ type: 'command.output.chunk', command_id: command.command_id, claim_token: command.claim_token,
+        offset: offset, bytes: end - offset });
+      state.ws.send(bytes.slice(offset, end));
+      return promise.then(function (reply) {
+        if (reply.message.command_id !== command.command_id || reply.message.offset !== end) throw new Error('ENGINE_OUTPUT_OFFSET');
+        offset = end;
+        if (offset < bytes.length) return chunk();
+        return exchange({ type: 'command.output.final', command_id: command.command_id,
+          claim_token: command.claim_token }, ['command.output.staged']).then(function (reply) {
+          var m = reply.message;
+          if (m.command_id !== command.command_id || m.bytes !== bytes.length || m.sha256 !== output.sha256
+              || m.mime !== 'model/gltf-binary' || m.state !== 'staged' || typeof m.name !== 'string') throw new Error('ENGINE_OUTPUT_RECEIPT');
+          // This is a private staging receipt. Only the BChat's current server
+          // authority can commit it to the Library and report a saved artifact.
+          value.output_stage = { command_id: m.command_id, bytes: m.bytes, sha256: m.sha256,
+            name: m.name, mime: m.mime, state: m.state };
+          value.data.persistence = 'private_staging_pending_library_commit';
+          return value;
+        });
+      });
+    }
+    return sha256Hex(bytes).then(function (digest) {
+      if (digest !== output.sha256) throw new Error('ENGINE_OUTPUT_CHANGED');
+      return exchange({ type: 'command.output.begin', command_id: command.command_id,
+        claim_token: command.claim_token, bytes: bytes.length, sha256: output.sha256 }, ['command.output.accepted']);
+    }).then(function (reply) {
+      if (reply.message.command_id !== command.command_id || reply.message.max_chunk_bytes !== 262144) throw new Error('ENGINE_OUTPUT_PROTOCOL');
+      return chunk();
+    });
+  }
+
+  function pollCommand() {
+    if (!state.commandProtocol || state.terminal || state.phase !== 'running' || state.commandBusy || state.waiter || state.saving || state.saveTimer) return;
+    var ready = memfs.read('automation/outbox.json');
+    if (!ready) return;
+    state.commandBusy = true;
+    var command = null;
+    exchange({ type: 'command.poll', request_id: randomId('poll_') }, ['command.next']).then(function (reply) {
+      command = reply.message.command;
+      if (!command) return;
+      if (command.window_id !== state.commandWindow || !/^[A-Za-z0-9_-]{1,96}$/.test(command.command_id || '')
+          || typeof command.claim_token !== 'string' || typeof command.action !== 'string') throw new Error('ENGINE_COMMAND_INVALID');
+      var deadline = Math.min(Date.now() + 180000, Number(command.expires_ts) * 1000);
+      if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('ENGINE_COMMAND_EXPIRED');
+      var request = { command_id: command.command_id, operation: command.action, args: command.params };
+      var bytes = utf8(JSON.stringify(request));
+      if (bytes.length > 48 * 1024) throw new Error('ENGINE_COMMAND_LIMIT');
+      return prepareCommandAsset(command).then(function () {
+        memfs.putFile('automation/inbox.json', bytes);
+        return mailboxResult(command.command_id, deadline);
+      }).then(function (value) {
+        if (!value.ok) return value;
+        if (value.data && (value.data.changed || value.data.execution === 'native_save_required')) {
+          return saveCommandChanges(deadline, command).then(function (receipt) {
+            value.save_receipt = receipt;
+            value.data.save_receipt = receipt;
+            value.data.persistence = 'library_receipt';
+            return value;
+          }).catch(function (error) {
+            return { ok: false, data: value.data, error: String(error.message || 'SAVE_UNCONFIRMED'), memory_changed: !!value.data.changed };
+          });
+        }
+        return value;
+      }).then(function (value) { return stageCommandOutput(command, value); }).then(function (value) {
+        return exchange({ type: 'command.result', command_id: command.command_id, claim_token: command.claim_token,
+          status: value.ok === true ? 'succeeded' : 'failed', result: value }, ['command.receipt']).then(function (reply) {
+          if (reply.message.command_id !== command.command_id) throw new Error('ENGINE_COMMAND_RECEIPT');
+          // Retain uncertain native output. Once Bosonoo records this exact
+          // result, its private stage owns exported bytes; packed images live
+          // in the editable scene. Only fixed per-command scratch is released.
+          if (value.ok === true) memfs.releaseCommandBuffers(command.command_id);
+          return reply;
+        });
+      });
+    }).catch(function (error) {
+      // The server fences claimed commands. Never repeat native edits after an
+      // uncertain dispatch or response, even if the socket later recovers.
+      if (command) setResult('An AI operation needs reconciliation. Keep this editor open; completed edits may still be present.');
+    }).then(function () { state.commandBusy = false; });
+  }
+
   function gpuWarningText() {
     var warning = document.getElementById('gpu-warning');
     if (!warning || warning.hidden) return '';
@@ -1317,7 +1510,7 @@
     }, SAVE_DEBOUNCE_MS);
   }
 
-  function requestSnapshot() {
+  function requestSnapshot(command) {
     if (state.terminal || !state.launched) return;
     state.hasUncommittedSave = true;
     if (state.saving) { state.dirtyWhileSaving = true; return; }
@@ -1334,12 +1527,14 @@
     state.cloudSaveError = false;
     state.dirtyWhileSaving = false;
     setResult('');
-    buildSnapshot(state.relativePath, bytes).then(runSnapshotExchange).then(function (outcome) {
+    return buildSnapshot(state.relativePath, bytes).then(function (built) { return runSnapshotExchange(built, command); }).then(function (outcome) {
       state.saving = false;
       state.hasUncommittedSave = outcome.type !== 'snapshot.saved' || state.dirtyWhileSaving;
       state.cloudSaveError = outcome.type !== 'snapshot.saved';
       setResult(describeOutcome(outcome));
       if (state.dirtyWhileSaving) scheduleSnapshot();
+      state.lastSnapshotOutcome = outcome;
+      return outcome;
     }, function (err) {
       state.saving = false;
       state.cloudSaveError = true;
@@ -1389,8 +1584,13 @@
     });
   }
 
-  function runSnapshotExchange(built) {
-    return exchange({ type: 'snapshot.propose' }, ['snapshot.request']).then(function (reply) {
+  function runSnapshotExchange(built, command) {
+    var proposal = { type: 'snapshot.propose' };
+    if (command && typeof command.command_id === 'string' && typeof command.claim_token === 'string') {
+      proposal.command_id = command.command_id;
+      proposal.claim_token = command.claim_token;
+    }
+    return exchange(proposal, ['snapshot.request']).then(function (reply) {
       var requestId = String(reply.message.requestId || '');
       if (!requestId) throw new Error('Bosonoo did not mint a snapshot request.');
       return new Promise(function (resolve, reject) {
@@ -1491,7 +1691,7 @@
     watchVendorConsole();
     // GPU capability is checked before spending the grant; workspace admission
     // uses the broker's account/project identities and precedes all hydration.
-    checkWebGpu().then(connect).then(recoverPending).then(hydrate).then(launchWhenReady).then(null, function (err) {
+    checkWebGpu().then(connect).then(recoverPending).then(hydrate).then(prepareAutomation).then(launchWhenReady).then(null, function (err) {
       if (!state.terminal) fail('failed', 'Could not open the file in browser Blender', String(err && err.message || err));
     });
   }

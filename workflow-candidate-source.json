@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "status": "unreleased-candidate",
+  "baseNativeRelease": "blender-5.3.0-alpha-20260921",
+  "nativeSourceUnchanged": true,
+  "sources": [
+    {
+      "path": "engine-runtime/pack/blender/automation.py",
+      "bytes": 16793,
+      "sha256": "8e743b1ff89ab15cbb785ec0192f49e4e998350eb075b63a39251bae6c079075"
+    },
+    {
+      "path": "engine-runtime/pack/blender/bridge.js",
+      "bytes": 78257,
+      "sha256": "fbd7f1edcb667924ea529c6cc4b13f8dba36064869c9064fdf8ebfb73d5a2db8"
+    },
+    {
+      "path": "engine-runtime/pack/blender/bosonoo.html",
+      "bytes": 7318,
+      "sha256": "4f162a29badd7292bb73bb7e1c8b12dddf4b0bbc58dc0a61644424fa4cb013a9"
+    },
+    {
+      "path": "engine-runtime/pack/storage.js",
+      "bytes": 8874,
+      "sha256": "3708c12666b4387bba4cdf8ad753a588023b0cfd9302e3a2a7973ca8df5773fc"
+    },
+    {
+      "path": "reproduce_adapter.py",
+      "bytes": 5593,
+      "sha256": "25d7672d0df032dcbe1d3610ef13b067a8da67205dfc16a7a108f220d442ca90"
+    }
+  ],
+  "qualification": {
+    "desktopBlender": "5.2.1 typed adapter acceptance passed in host test workspace",
+    "browserBlender": "pending",
+    "livePack": "not published"
+  }
+}
