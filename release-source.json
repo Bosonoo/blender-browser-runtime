@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "packId": "blender-5.3.0-alpha-20260921",
+  "blenderRevision": "6b031d3d41c392883e3c495aa72343e10d15b43d",
+  "browserBuilderRevision": "60315a3001911bb947014e5e510d6bfcd0143bdb",
+  "blenderRepository": "https://github.com/HeyPuter/blender",
+  "browserBuilderRepository": "https://github.com/HeyPuter/blender-wasm",
+  "nativeSource": {
+    "file": "source.tar.gz",
+    "bytes": 822802908,
+    "sha256": "78de34c8a2cb17bda5b5ec601bfb2e452b0ca636b776c375f6ef013668e68f7c",
+    "releaseUrl": "https://github.com/Bosonoo/blender-browser-runtime/releases/download/blender-5.3.0-alpha-20260921/source.tar.gz",
+    "distributionUrl": "https://engines-alpha.bosonoo.com/engine-packs/blender/blender-5.3.0-alpha-20260921/source.tar.gz"
+  },
+  "extractedAdapterSources": [
+    {
+      "path": "engine-runtime/blender/bosonoo_autosave.inc",
+      "bytes": 3899,
+      "sha256": "11f1c63a9620fa590bf8453090eda6748fa3f084709014de097bdcec3be41094"
+    },
+    {
+      "path": "engine-runtime/blender/apply_browser_adapter.py",
+      "bytes": 3913,
+      "sha256": "cc511b2d7e64628512dfcebe22ca1cfe7ffb6533336e8b274e4a567d946ccaf2"
+    },
+    {
+      "path": "engine-runtime/blender/upgrade_native_adapter.py",
+      "bytes": 1637,
+      "sha256": "664d51a1db00741a6d18ec389ad0e73b2988b21ddd3d866fcb7f92f22f68e728"
+    },
+    {
+      "path": "engine-runtime/blender/apply_curvature_sampling.py",
+      "bytes": 2689,
+      "sha256": "4cd11be35e7177c0ee15277eeee43595de25e9f9303230f5ba3b010d02b73974"
+    },
+    {
+      "path": "engine-runtime/blender/README.md",
+      "bytes": 3153,
+      "sha256": "05e3e3c4aaf4728d3cd76095ddece7bd7e79a34648a085dec2025169da5ba582"
+    },
+    {
+      "path": "engine-runtime/pack/blender/bridge.js",
+      "bytes": 66025,
+      "sha256": "79298430eb3cb49f4410457b8250528863b3fa91819fa23374b796f1eb621fee"
+    },
+    {
+      "path": "engine-runtime/pack/blender/bosonoo.html",
+      "bytes": 7318,
+      "sha256": "4f162a29badd7292bb73bb7e1c8b12dddf4b0bbc58dc0a61644424fa4cb013a9"
+    },
+    {
+      "path": "engine-runtime/pack/storage.js",
+      "bytes": 8874,
+      "sha256": "3708c12666b4387bba4cdf8ad753a588023b0cfd9302e3a2a7973ca8df5773fc"
+    }
+  ],
+  "shippedAssets": [
+    {
+      "path": "blender.js",
+      "bytes": 469035,
+      "sha256": "6d047bc41da29a93e37da5202953aa289abfa9aa124fb6b19c4f336c4d212f8c"
+    },
+    {
+      "path": "blender.wasm.zst",
+      "bytes": 23313088,
+      "sha256": "a0ad42d90462b5811ab8e1e2fcc1b2fe68dad6f5234374285f388a1f15f48b60"
+    },
+    {
+      "path": "assets.tar.zst",
+      "bytes": 36093937,
+      "sha256": "02689bb67a001269e8b031772537b24a132b888a8f86056aa19019b3df3f42f0"
+    },
+    {
+      "path": "assets/index-DWkjavjX.js",
+      "bytes": 85309,
+      "sha256": "46f28d923d38ac97532e6675e2c75c9355bcad4b6231552e2d7b51268153de0c"
+    },
+    {
+      "path": "bosonoo.html",
+      "bytes": 7293,
+      "sha256": "3f983a31415bf0b86363d2af84c360ba75b691a8050e4f21845c4f53ae23a650"
+    },
+    {
+      "path": "bosonoo/config.js",
+      "bytes": 254,
+      "sha256": "2c7dbe456695966faddea72088db4db50cfff1cec1fa247536f87c08ebb88754"
+    },
+    {
+      "path": "bosonoo/storage.js",
+      "bytes": 8874,
+      "sha256": "3708c12666b4387bba4cdf8ad753a588023b0cfd9302e3a2a7973ca8df5773fc"
+    },
+    {
+      "path": "bosonoo/bridge.js",
+      "bytes": 66025,
+      "sha256": "79298430eb3cb49f4410457b8250528863b3fa91819fa23374b796f1eb621fee"
+    }
+  ],
+  "independentCleanRebuildVerified": false
+}
