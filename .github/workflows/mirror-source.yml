@@ -1,0 +1,32 @@
+name: Mirror pinned Blender source
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  mirror:
+    if: github.repository == 'Bosonoo/blender-browser-runtime' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download and verify public corresponding source
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 --max-time 900 \
+            --output source.tar.gz \
+            https://engines-alpha.bosonoo.com/engine-packs/blender/blender-5.3.0-alpha-20260921/source.tar.gz
+          test "$(stat --format=%s source.tar.gz)" = 822802908
+          printf '%s  source.tar.gz\n' 78de34c8a2cb17bda5b5ec601bfb2e452b0ca636b776c375f6ef013668e68f7c | sha256sum --check --strict
+      - name: Attach verified source to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload blender-5.3.0-alpha-20260921 source.tar.gz \
+            --repo Bosonoo/blender-browser-runtime
