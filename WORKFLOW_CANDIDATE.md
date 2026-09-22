@@ -1,7 +1,8 @@
 # Unreleased typed workflow adapter
 
 This branch adds fixed Blender-side scene inspection, bounded primitive/object
-edits, packed PNG application, native save, and GLB export. The bridge accepts
+edits (including delete, parent, smooth/flat shading and roughness/metallic/emission
+materials), packed PNG application, native save, and whole-scene or per-object GLB export. The bridge accepts
 only claimed, window-bound commands from the separately implemented host.
 It has no caller-supplied Python, operator names, RNA paths, or generic eval.
 Uploaded scripts remain disabled. The new automation.py is GPL-3.0-or-later.

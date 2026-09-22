@@ -6,8 +6,8 @@
   "sources": [
     {
       "path": "engine-runtime/pack/blender/automation.py",
-      "bytes": 16793,
-      "sha256": "8e743b1ff89ab15cbb785ec0192f49e4e998350eb075b63a39251bae6c079075"
+      "bytes": 27213,
+      "sha256": "b39c016ddc66a36780f00b020d00fd01a17f23d2f1b80b9001eeab949c21fd3b"
     },
     {
       "path": "engine-runtime/pack/blender/bridge.js",
