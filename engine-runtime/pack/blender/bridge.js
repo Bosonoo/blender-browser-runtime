@@ -1240,12 +1240,42 @@
     });
   }
 
-  function mailboxResult(commandId, deadline) {
+  // The runtime's file layer keeps bytes it already read from a path, so a rewritten
+  // request file reads back as old-prefix + new-suffix. Each command therefore goes to a
+  // new in-N.json in the in-memory filesystem and its answer to a new out-N.json
+  // (automation.py LIVE_ROOT); the mount inbox remains for desktop Blender.
+  var LIVE_MAILBOX = '/tmp/bosonoo-automation';
+  function writeLiveInbox(bytes) {
+    var fs = moduleValue && moduleValue.FS;
+    if (!state.liveMailboxLogged) {
+      state.liveMailboxLogged = true;
+      console.log('[bosonoo-engine] live command mailbox ' + (fs && typeof fs.writeFile === 'function' ? 'available' : 'unavailable'));
+    }
+    if (!fs || typeof fs.writeFile !== 'function' || typeof fs.rename !== 'function') return 0;
+    var seq = (state.liveSeq || 0) + 1;
+    try {
+      try { fs.mkdirTree(LIVE_MAILBOX); } catch (err) { /* exists */ }
+      fs.writeFile(LIVE_MAILBOX + '/in-' + seq + '.tmp', bytes);
+      fs.rename(LIVE_MAILBOX + '/in-' + seq + '.tmp', LIVE_MAILBOX + '/in-' + seq + '.json');
+    } catch (err) { return 0; }
+    state.liveSeq = seq;
+    return seq;
+  }
+
+  function readLiveResult(seq) {
+    var fs = moduleValue && moduleValue.FS;
+    if (!seq || !fs || typeof fs.readFile !== 'function') return null;
+    try { return fs.readFile(LIVE_MAILBOX + '/out-' + seq + '.json'); } catch (err) { return null; }
+  }
+
+  function mailboxResult(commandId, deadline, seq) {
     return new Promise(function (resolve, reject) {
       (function poll() {
         if (state.terminal) { reject(new Error('ENGINE_DISCONNECTED')); return; }
-        var raw = memfs.read('automation/outbox.json');
-        if (raw && raw.length <= 64 * 1024) {
+        var sources = [readLiveResult(seq), memfs.read('automation/outbox.json')];
+        for (var i = 0; i < sources.length; i += 1) {
+          var raw = sources[i];
+          if (!raw || raw.length > 64 * 1024) continue;
           try {
             var value = JSON.parse(new TextDecoder().decode(raw));
             if (value.command_id === commandId) { resolve(value); return; }
@@ -1367,7 +1397,7 @@
       if (bytes.length > 48 * 1024) throw new Error('ENGINE_COMMAND_LIMIT');
       return prepareCommandAsset(command).then(function () {
         memfs.putFile('automation/inbox.json', bytes);
-        return mailboxResult(command.command_id, deadline);
+        return mailboxResult(command.command_id, deadline, writeLiveInbox(bytes));
       }).then(function (value) {
         if (!value.ok) return value;
         if (value.data && (value.data.changed || value.data.execution === 'native_save_required')) {

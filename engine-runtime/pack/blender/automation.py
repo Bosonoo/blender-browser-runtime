@@ -13,8 +13,14 @@ import json
 import math
 import os
 import re
+import struct
 
 ROOT = "/bosonoo/automation"
+# The browser runtime's file layer keeps the bytes it already read from a path, so a
+# rewritten request file came back as old-prefix + new-suffix and every command after
+# the first was lost. In the browser the bridge therefore writes request N once to
+# in-N.json (in memory) and the answer goes to a new out-N.json; no path is reused.
+LIVE_ROOT = "/tmp/bosonoo-automation"
 MAX_REQUEST_BYTES = 48 * 1024
 MAX_OBJECTS = 2000
 MAX_EXPORT_BYTES = 8 * 1024 * 1024
@@ -27,6 +33,7 @@ _revision = 1
 _busy = False
 _completed = {}
 _last_input = None
+_live_seq = 1
 
 
 def _fields(value, allowed, required=()):
@@ -279,6 +286,199 @@ def inspect(bpy):
             for obj in objects[:100]]}
 
 
+def _gltf_without_ctypes():
+    # The browser build's Python has no _ctypes, yet the glTF exporter imports its
+    # Draco module (ctypes only at compression time; compression stays off) on load.
+    try:
+        import ctypes  # noqa: F401
+    except ImportError:
+        import sys
+        import types
+        sys.modules.setdefault("ctypes", types.ModuleType("ctypes"))
+
+
+def _native_gltf():
+    # Blender's own glTF exporter needs numpy, which the browser build's Python also lacks.
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+# glTF is Y-up: glTF axis i = sign * Blender axis, i.e. (x, y, z) -> (x, z, -y) for points and
+# normals, and C @ M @ C^-1 for node matrices, so C(M p) == G (C p) for every point p.
+_AXES = ((0, 1), (2, 1), (1, -1), (3, 1))
+_IDENTITY = [float(r == c) for c in range(4) for r in range(4)]
+_LIMIT = "GLB export unavailable or exceeds the output limit"
+
+
+def _y_up(matrix):
+    # Column-major, as glTF stores node matrices.
+    return [si * sj * matrix[pi][pj] for pj, sj in _AXES for pi, si in _AXES]
+
+
+def _view(gltf, blob, data, target=None):
+    blob.extend(bytes(-len(blob) % 4))
+    if len(blob) + len(data) > MAX_EXPORT_BYTES:
+        raise RuntimeError(_LIMIT)
+    gltf.setdefault("bufferViews", []).append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(data), **({"target": target} if target else {})})
+    blob.extend(data)
+    return len(gltf["bufferViews"]) - 1
+
+
+def _accessor(gltf, blob, values, kind, target, code="f", bounds=False):
+    width, raw = {"SCALAR": 1, "VEC2": 2, "VEC3": 3}[kind], struct.pack(f"<{len(values)}{code}", *values)
+    item = {"bufferView": _view(gltf, blob, raw, target), "componentType": 5126 if code == "f" else 5125, "count": len(values) // width, "type": kind}
+    if bounds:
+        # min/max describe the stored float32 values exactly.
+        stored = struct.unpack(f"<{len(values)}{code}", raw)
+        item["min"], item["max"] = ([pick(stored[i::width]) for i in range(width)] for pick in (min, max))
+    gltf.setdefault("accessors", []).append(item)
+    return len(gltf["accessors"]) - 1
+
+
+def _glb(gltf, blob):
+    # 12-byte header, a space-padded JSON chunk, then a zero-padded BIN chunk when there is data.
+    if blob:
+        gltf["buffers"] = [{"byteLength": len(blob)}]
+    text = json.dumps(gltf, separators=(",", ":"), allow_nan=False).encode()
+    body = struct.pack("<II", len(text) + -len(text) % 4, 0x4E4F534A) + text + b" " * (-len(text) % 4)
+    if blob:
+        body += struct.pack("<II", len(blob) + -len(blob) % 4, 0x004E4942) + bytes(blob) + bytes(-len(blob) % 4)
+    return struct.pack("<4sII", b"glTF", 2, 12 + len(body)) + body
+
+
+def _pbr(gltf, blob, material, cache):
+    if ("material", material) in cache:
+        return cache["material", material]
+    tree = material.node_tree
+    shader = next((node for node in tree.nodes if node.bl_idname == "ShaderNodeBsdfPrincipled"), None) if tree else None
+    inputs = shader.inputs if shader else {}
+
+    def value(key, default):
+        socket = inputs.get(key)
+        return socket.default_value if socket is not None else default
+
+    def unit(x):
+        return min(1.0, max(0.0, float(x)))
+
+    alpha = unit(value("Alpha", material.diffuse_color[3]))
+    pbr = {"baseColorFactor": [unit(c) for c in tuple(value("Base Color", material.diffuse_color))[:3]] + [alpha],
+           "metallicFactor": unit(value("Metallic", material.metallic)), "roughnessFactor": unit(value("Roughness", material.roughness))}
+    out = {"name": material.name, "pbrMetallicRoughness": pbr, "doubleSided": not material.use_backface_culling}
+    if alpha < 1:
+        out["alphaMode"] = "BLEND"
+    base = inputs.get("Base Color")
+    link = next((link for link in base.links if not link.is_muted), None) if base is not None else None
+    image = link.from_node.image if link and link.from_node.bl_idname == "ShaderNodeTexImage" else None
+    # Only image bytes packed in the .blend are embedded; an external file is never referenced.
+    raw = bytes(image.packed_file.data) if image is not None and image.packed_file else b""
+    mime = "image/png" if raw.startswith(b"\x89PNG\r\n\x1a\n") else "image/jpeg" if raw.startswith(b"\xff\xd8\xff") else None
+    if mime:
+        if ("texture", image) not in cache:
+            gltf.setdefault("samplers", [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}])
+            gltf.setdefault("images", []).append({"name": image.name, "mimeType": mime, "bufferView": _view(gltf, blob, raw)})
+            gltf.setdefault("textures", []).append({"sampler": 0, "source": len(gltf["images"]) - 1})
+            cache["texture", image] = len(gltf["textures"]) - 1
+        pbr["baseColorTexture"], pbr["baseColorFactor"] = {"index": cache["texture", image], "texCoord": 0}, [1.0, 1.0, 1.0, alpha]
+    strength, glow = max(0.0, float(value("Emission Strength", 0))), [unit(c) for c in tuple(value("Emission Color", (0, 0, 0)))[:3]]
+    if strength > 0 and max(glow) > 0:
+        out["emissiveFactor"] = [c * min(strength, 1.0) for c in glow]
+        if strength > 1:
+            out["extensions"] = {"KHR_materials_emissive_strength": {"emissiveStrength": strength}}
+            gltf["extensionsUsed"] = ["KHR_materials_emissive_strength"]
+    gltf.setdefault("materials", []).append(out)
+    cache["material", material] = len(gltf["materials"]) - 1
+    return cache["material", material]
+
+
+def _primitives(gltf, blob, obj, evaluated, cache):
+    mesh = evaluated.to_mesh()
+    try:
+        mesh.calc_loop_triangles()
+        tris, corners, layer = mesh.loop_triangles, mesh.loops, mesh.uv_layers.active
+        # Every triangle costs at least its three 4-byte indices; refuse before copying a huge mesh.
+        if len(blob) + 12 * len(tris) > MAX_EXPORT_BYTES:
+            raise RuntimeError(_LIMIT)
+        loops, slots, vertex = [0] * (3 * len(tris)), [0] * len(tris), [0] * len(corners)
+        co, normal, uv = [0.0] * (3 * len(mesh.vertices)), [0.0] * (3 * len(corners)), [0.0] * (2 * len(corners)) if layer else None
+        tris.foreach_get("loops", loops)
+        tris.foreach_get("material_index", slots)
+        corners.foreach_get("vertex_index", vertex)
+        mesh.vertices.foreach_get("co", co)
+        # Corner (split) normals already follow flat, smooth and sharp-edge shading.
+        mesh.corner_normals.foreach_get("vector", normal)
+        if layer:
+            layer.data.foreach_get("uv", uv)
+    finally:
+        evaluated.to_mesh_clear()
+    groups = {}
+    for t, slot in enumerate(slots):
+        seen, order = groups.setdefault(slot, ({}, []))
+        for c in loops[3 * t:3 * t + 3]:
+            v, (x, y, z) = 3 * vertex[c], normal[3 * c:3 * c + 3]
+            length = math.sqrt(x * x + y * y + z * z)
+            x, y, z = (x / length, y / length, z / length) if length > 1e-12 else (0.0, 0.0, 1.0)
+            # One vertex per distinct corner; glTF texture space starts at the top (v' = 1 - v).
+            key = (co[v], co[v + 2], -co[v + 1], x, z, -y) + ((uv[2 * c], 1 - uv[2 * c + 1]) if uv else ())
+            order.append(seen.setdefault(key, len(seen)))
+    primitives = []
+    for slot, (seen, order) in sorted(groups.items()):
+        keys = list(seen)
+        attributes = {"POSITION": _accessor(gltf, blob, [x for key in keys for x in key[:3]], "VEC3", 34962, bounds=True),
+                      "NORMAL": _accessor(gltf, blob, [x for key in keys for x in key[3:6]], "VEC3", 34962)}
+        if uv:
+            attributes["TEXCOORD_0"] = _accessor(gltf, blob, [x for key in keys for x in key[6:]], "VEC2", 34962)
+        primitive = {"attributes": attributes, "indices": _accessor(gltf, blob, order, "SCALAR", 34963, "I")}
+        material = obj.material_slots[slot].material if slot < len(obj.material_slots) else None
+        if material is not None:
+            primitive["material"] = _pbr(gltf, blob, material, cache)
+        primitives.append(primitive)
+    return primitives
+
+
+def _write_glb(bpy, objects, path):
+    """Pure-Python GLB 2.0 writer for Pythons without numpy, where Blender's exporter cannot load.
+
+    Mesh objects only (no cameras, lights, animation, skins, morph targets or instances): evaluated
+    triangles, corner normals, the active UV map and one primitive per used material slot; each
+    material's first Principled BSDF factors, emission and a packed PNG/JPEG base colour image.
+    """
+    graph = bpy.context.evaluated_depsgraph_get()
+    meshes = [obj for obj in objects if obj.type == "MESH"]
+    index = {obj: i for i, obj in enumerate(meshes)}
+    gltf, blob, cache, children, nodes = {"asset": {"version": "2.0", "generator": "Bosonoo Blender adapter"}, "scene": 0}, bytearray(), {}, {}, []
+    for obj in meshes:
+        if obj.parent in index:
+            children.setdefault(obj.parent, []).append(index[obj])
+    for obj in meshes:
+        evaluated = obj.evaluated_get(graph)
+        matrix = evaluated.matrix_world
+        if obj.parent in index:
+            # A child keeps its place relative to an exported parent; any other object is a root at its world matrix.
+            matrix = obj.parent.evaluated_get(graph).matrix_world.inverted_safe() @ matrix
+        node, flat = {"name": obj.name}, _y_up(matrix)
+        if flat != _IDENTITY:
+            node["matrix"] = flat
+        if obj in children:
+            node["children"] = children[obj]
+        primitives = _primitives(gltf, blob, obj, evaluated, cache)
+        if primitives:
+            node["mesh"] = len(gltf.setdefault("meshes", []))
+            gltf["meshes"].append({"name": obj.data.name, "primitives": primitives})
+        nodes.append(node)
+    roots = [index[obj] for obj in meshes if obj.parent not in index]
+    gltf["scenes"] = [{"nodes": roots} if roots else {}]
+    if nodes:
+        gltf["nodes"] = nodes
+    data = _glb(gltf, blob)
+    if len(data) > MAX_EXPORT_BYTES:
+        raise RuntimeError(_LIMIT)
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
 def _export(bpy, args, command_id):
     global _busy
     layer = bpy.context.view_layer
@@ -297,8 +497,19 @@ def _export(bpy, args, command_id):
                 obj.select_set(obj in chosen)
             if not all(obj.select_get() for obj in chosen):
                 raise ValueError("A named object is hidden or cannot be selected for export")
-        result = bpy.ops.export_scene.gltf(filepath=export_path, check_existing=False, export_format="GLB", use_selection=bool(chosen),
-            use_active_scene=True, export_animations=False, export_cameras=False, export_extras=False, export_lights=False)
+        result = None
+        if _native_gltf():
+            _gltf_without_ctypes()
+            try:
+                result = bpy.ops.export_scene.gltf(filepath=export_path, check_existing=False, export_format="GLB", use_selection=bool(chosen),
+                    use_active_scene=True, export_animations=False, export_cameras=False, export_extras=False, export_lights=False)
+            except Exception as error:
+                # Only an exporter that cannot import its modules falls back; any other failure stays a failure.
+                if not isinstance(error, ImportError) and not re.search(r"\b(ImportError|ModuleNotFoundError)\b", str(error)):
+                    raise
+        if result is None:
+            _write_glb(bpy, chosen or list(layer.objects), export_path)
+            result = {"FINISHED"}
     finally:
         if chosen:
             for obj in layer.objects:
@@ -455,13 +666,17 @@ def execute(bpy, operation, args, command_id):
         _busy = False
 
 
-def _write(value):
+def _write(value, live_seq=None):
     raw = json.dumps(value, separators=(",", ":"), allow_nan=False)
     if len(raw.encode()) > MAX_REQUEST_BYTES:
         raw = json.dumps({"command_id": value.get("command_id"), "ok": False, "error": "RESULT_LIMIT"})
     with open(f"{ROOT}/outbox.tmp", "w", encoding="utf-8") as handle:
         handle.write(raw)
     os.replace(f"{ROOT}/outbox.tmp", f"{ROOT}/outbox.json")
+    if live_seq is not None:
+        with open(f"{LIVE_ROOT}/out-{live_seq}.tmp", "w", encoding="utf-8") as handle:
+            handle.write(raw)
+        os.replace(f"{LIVE_ROOT}/out-{live_seq}.tmp", f"{LIVE_ROOT}/out-{live_seq}.json")
 
 
 def start():
@@ -475,13 +690,24 @@ def start():
             _revision += 1
 
     def poll():
-        global _last_input
+        global _last_input, _live_seq
+        seq = None
         try:
-            with open(f"{ROOT}/inbox.json", "rb") as handle:
-                raw = handle.read(MAX_REQUEST_BYTES + 1)
-            if raw == _last_input:
+            live = f"{LIVE_ROOT}/in-{_live_seq}.json"
+            if os.path.isfile(live):
+                # Each browser request path is read exactly once, even if it is malformed.
+                seq, path = _live_seq, live
+                _live_seq += 1
+            elif os.path.isdir(LIVE_ROOT):
                 return 0.25
-            _last_input = raw
+            else:
+                path = f"{ROOT}/inbox.json"
+            with open(path, "rb") as handle:
+                raw = handle.read(MAX_REQUEST_BYTES + 1)
+            if seq is None:
+                if raw == _last_input:
+                    return 0.25
+                _last_input = raw
             if len(raw) > MAX_REQUEST_BYTES:
                 return 0.25
             request = json.loads(raw)
@@ -493,12 +719,12 @@ def start():
             if key in _completed:
                 prior_hash, result = _completed[key]
                 if prior_hash != digest:
-                    _write({"command_id": key, "ok": False, "error": "COMMAND_IDENTITY_CONFLICT"})
+                    _write({"command_id": key, "ok": False, "error": "COMMAND_IDENTITY_CONFLICT"}, seq)
                 else:
-                    _write(result)
+                    _write(result, seq)
                 return 0.25
             if len(_completed) >= 500:
-                _write({"command_id": key, "ok": False, "error": "SESSION_COMMAND_LIMIT"})
+                _write({"command_id": key, "ok": False, "error": "SESSION_COMMAND_LIMIT"}, seq)
                 return 0.25
             try:
                 result = {"command_id": key, "ok": True, "data": execute(bpy, request["operation"], request["args"], key)}
@@ -507,7 +733,7 @@ def start():
             except Exception:
                 result = {"command_id": key, "ok": False, "error": "BLENDER_OPERATION_FAILED", "scene_revision": _revision}
             _completed[key] = (digest, result)
-            _write(result)
+            _write(result, seq)
         except (OSError, ValueError, TypeError):
             pass
         return 0.25

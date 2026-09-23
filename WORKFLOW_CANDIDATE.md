@@ -2,7 +2,12 @@
 
 This branch adds fixed Blender-side scene inspection, bounded primitive/object
 edits (including delete, parent, smooth/flat shading and roughness/metallic/emission
-materials), packed PNG application, native save, and whole-scene or per-object GLB export. The bridge accepts
+materials), packed PNG application, native save, and whole-scene or per-object GLB export.
+GLB export falls back to a bounded pure-Python writer (mesh objects, hierarchy, PBR/emission,
+packed Base Color images) when Blender's own glTF exporter cannot load, as in the browser
+build whose Python has neither numpy nor _ctypes. Each command now reaches Blender through a
+one-use in-memory request/result file pair, because the browser file layer can return stale
+bytes for a rewritten path. The bridge accepts
 only claimed, window-bound commands from the separately implemented host.
 It has no caller-supplied Python, operator names, RNA paths, or generic eval.
 Uploaded scripts remain disabled. The new automation.py is GPL-3.0-or-later.
