@@ -6,8 +6,8 @@
   "sources": [
     {
       "path": "engine-runtime/pack/blender/automation.py",
-      "bytes": 40257,
-      "sha256": "e6f9797d6bcb94c88ba57f85e06e96f74babb1dbcdf959e054173e6b502f436c"
+      "bytes": 40457,
+      "sha256": "ac56d87387935f6e5042757838b415118ac0a77718231de37e5f82dd67800386"
     },
     {
       "path": "engine-runtime/pack/blender/bridge.js",
@@ -36,8 +36,8 @@
     }
   ],
   "qualification": {
-    "desktopBlender": "5.2.1 typed adapter acceptance passed in host test workspace",
-    "browserBlender": "Pending native browser qualification for the 2026-09-25 combined bridge and session preview guard; not a release qualification",
+    "desktopBlender": "5.2.1: 87 automation tests passed including seven native cases and three negative-control unused-image save/reopen regressions (2026-09-25)",
+    "browserBlender": "5.3 alpha: focused material creation/preview, image import/save/reopen/pixel display and GLB export/viewer checks passed locally on 2026-09-25; not complete release approval",
     "livePack": "not published"
   }
 }

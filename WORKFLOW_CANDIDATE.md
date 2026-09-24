@@ -27,9 +27,17 @@ It checks the action, actor and parameter shape before native execution; it
 does not accept an arbitrary script or privileged host command. The host's
 Library UI and authorization implementation are deliberately separate.
 
+An imported packed image is explicitly retained even before it is assigned to a
+material. This prevents Blender from discarding an unused image during save and
+reopen. Native Blender 5.2.1 roundtrip tests cover person PNG/JPEG and unassigned
+AI imports, plus failed-import rollback. The corresponding 5.3 browser rebuild
+also passed a focused UI import, save, close and reopen check: the unassigned
+packed image remained selectable and its pixels rendered in the Image Editor.
+This is focused adapter acceptance, not a complete release qualification.
+
 workflow-candidate-source.json records exact candidate source hashes.
 release-source.json continues to describe the existing published release,
-not these unshipped changes. No browser qualification or live deployment is
+not these unshipped changes. No full release qualification or live deployment is
 claimed here. The final release must bind generated output hashes and its
 explicit broker configuration after qualification.
 

@@ -656,6 +656,9 @@ def execute(bpy, operation, args, command_id, *, person=False):
             imported = bpy.data.images.load(asset_path, check_existing=False)
             imported.name = args["name"]
             imported.pack()
+            # An explicit Library import must survive saving before a material
+            # references it; packing bytes alone does not retain an unused ID.
+            imported.use_fake_user = True
             if target is not None:
                 backups.append(_snapshot(target))
                 material = _material(bpy, args["name"] + " Material", (1, 1, 1, 1), imported)
