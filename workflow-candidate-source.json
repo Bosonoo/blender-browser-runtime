@@ -6,13 +6,13 @@
   "sources": [
     {
       "path": "engine-runtime/pack/blender/automation.py",
-      "bytes": 38883,
-      "sha256": "e3da690fc936256bc13ff12dbec872ce36a45e923b825c9efdf153c0712112ff"
+      "bytes": 40257,
+      "sha256": "e6f9797d6bcb94c88ba57f85e06e96f74babb1dbcdf959e054173e6b502f436c"
     },
     {
       "path": "engine-runtime/pack/blender/bridge.js",
-      "bytes": 79794,
-      "sha256": "88887a01f38ea70c0b07eb4bdce65d278ec06cdf8d586dbdc124eb8df55ddb46"
+      "bytes": 82710,
+      "sha256": "d8b2f9a97e7e604ab23208904a169f31099c8e76ca1ec03a95aca7bade941edd"
     },
     {
       "path": "engine-runtime/pack/blender/bosonoo.html",
@@ -26,13 +26,18 @@
     },
     {
       "path": "reproduce_adapter.py",
-      "bytes": 5593,
-      "sha256": "25d7672d0df032dcbe1d3610ef13b067a8da67205dfc16a7a108f220d442ca90"
+      "bytes": 5686,
+      "sha256": "b35d447067440cfbeb80b251e9855fa6d0434fba3dc906695a12e79997890a4c"
+    },
+    {
+      "path": "engine-runtime/pack/blender/session.py",
+      "bytes": 8548,
+      "sha256": "d9a34bc50dcb61b8bd6e36e71570ccfa85469056316ed670cf78b150ecdd39da"
     }
   ],
   "qualification": {
     "desktopBlender": "5.2.1 typed adapter acceptance passed in host test workspace",
-    "browserBlender": "pending (local development smoke only, 2026-09-23: repeated commands and GLB export in headless Chromium; not a release qualification)",
+    "browserBlender": "Pending native browser qualification for the 2026-09-25 combined bridge and session preview guard; not a release qualification",
     "livePack": "not published"
   }
 }

@@ -94,9 +94,10 @@ def main():
     _write_text(args.out/'bosonoo/config.js', config)
     for source, name in [('engine-runtime/pack/storage.js', 'storage.js'),
                          ('engine-runtime/pack/blender/bridge.js', 'bridge.js'),
-                         ('engine-runtime/pack/blender/automation.py', 'automation.py')]:
+                         ('engine-runtime/pack/blender/automation.py', 'automation.py'),
+                         ('engine-runtime/pack/blender/session.py', 'session.py')]:
         (args.out/'bosonoo'/name).write_bytes((root/source).read_bytes().replace(b'\r\n', b'\n'))
-    print('Reproduced bosonoo.html, bosonoo/{config,storage,bridge}.js and bosonoo/automation.py')
+    print('Reproduced bosonoo.html, bosonoo/{config,storage,bridge}.js and bosonoo/{automation,session}.py')
 
 if __name__ == '__main__':
     main()

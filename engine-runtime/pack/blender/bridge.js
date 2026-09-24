@@ -12,7 +12,9 @@
  *   3. open the WebSocket to window.BOSONOO_BROKER_WS and send engine.connect;
  *   4. hydrate the single .blend into the in-memory provider that Blender mounts at
  *      /bosonoo, verifying its byte count and SHA-256;
- *   5. window.__BARGS = ['/bosonoo/workspace/<safeName>'] and nothing else;
+ *   5. window.__BARGS = ['--disable-autoexec', '/bosonoo/workspace/<safeName>',
+ *      '--python', '/bosonoo/runtime/session.py'] (the pack's session guard), plus
+ *      the pack's command adapter when the broker granted the command protocol;
  *   6. launch through the vendor Launch button once the file is loaded and the
  *      vendor download is done;
  *   7. a provider write or rename that lands on the open file is the user's save
@@ -329,7 +331,7 @@
       putReadOnly: function (path, data) { var key = putFile(path, data); readOnly.add(key); },
       releaseCommandBuffers: function (id) {
         if (!/^[A-Za-z0-9_-]{1,96}$/.test(id || '')) throw new Error('Invalid command buffer identity.');
-        ['automation/assets/' + id + '.png', 'automation/outputs/' + id + '.glb'].forEach(function (key) {
+        ['automation/assets/' + id + '.png', 'automation/assets/' + id + '.jpg', 'automation/outputs/' + id + '.glb'].forEach(function (key) {
           files.delete(key); readOnly.delete(key);
         });
       },
@@ -452,8 +454,9 @@
     }
   });
 
-  // argv: exactly the hydrated file's absolute path once armed; nothing else, ever.
-  // An accessor so no other script can append --python, an add-on or a config.
+  // argv: the hydrated file's absolute path and the manifest-pinned pack scripts
+  // (prepareSessionScripts); nothing else, ever. An accessor so no other script can
+  // append --python, an add-on or a config.
   var EMPTY_ARGS = Object.freeze([]);
   function defineLocked(name, descriptor) {
     try {
@@ -788,6 +791,9 @@
   function targetLine() {
     var target = state.saveTarget;
     if (!target || !target.name) return 'Bosonoo will say where a save from this window goes.';
+    if (target.kind === 'in_place' && target.starter) {
+      return 'Saves go straight into ' + target.name + '. Desktop Blender 5.2 cannot open browser saves.';
+    }
     if (target.kind === 'in_place') {
       return 'This is a browser Blender copy. Saves replace ' + target.name + '. Desktop Blender 5.2 cannot open it.';
     }
@@ -991,7 +997,9 @@
     if (!value || typeof value !== 'object') return null;
     var kind = value.kind === 'in_place' ? 'in_place' : (value.kind === 'browser_copy' ? 'browser_copy' : '');
     var name = typeof value.name === 'string' ? value.name : '';
-    return kind && name ? { kind: kind, name: name } : null;
+    if (!kind || !name) return null;
+    // A Bosonoo blank starter is saved into directly; it is nobody's copy.
+    return kind === 'in_place' && value.starter === true ? { kind: kind, name: name, starter: true } : { kind: kind, name: name };
   }
 
   function connect() {
@@ -1127,7 +1135,12 @@
     if (m.type === 'snapshot.saved') {
       var target = m.target && typeof m.target === 'object' ? m.target : null;
       var name = target && typeof target.name === 'string' && target.name ? target.name : '';
-      if (target && target.kind && name) state.saveTarget = { kind: target.kind === 'in_place' ? 'in_place' : 'browser_copy', name: name };
+      if (target && target.kind && name) {
+        var kind = target.kind === 'in_place' ? 'in_place' : 'browser_copy';
+        // Receipts name the kind only; a starter stays a starter.
+        var starter = kind === 'in_place' && Boolean(state.saveTarget && state.saveTarget.starter);
+        state.saveTarget = starter ? { kind: kind, name: name, starter: true } : { kind: kind, name: name };
+      }
       return name ? 'Saved to ' + name : 'Saved to Bosonoo';
     }
     if (m.type === 'snapshot.failed') return 'Save failed — ' + String(m.message || m.code || 'unknown') + '. Press Ctrl+S to retry; your saved browser copy is retained.';
@@ -1223,20 +1236,38 @@
   }
 
   // --- 6. launch -----------------------------------------------------------
-  function prepareAutomation() {
-    if (!state.commandProtocol) return Promise.resolve();
-    if (!state.commandWindow || typeof fetch !== 'function') return Promise.reject(new Error('The engine command handshake is incomplete.'));
-    return fetch(new URL('bosonoo/automation.py', window.location.href).href,
+  // A manifest-pinned pack script, read-only in the provider. Only these run;
+  // scripts inside the .blend stay off (--disable-autoexec).
+  function loadPackScript(url, key, missing, invalid) {
+    return fetch(new URL(url, window.location.href).href,
       { credentials: 'omit', cache: 'force-cache', redirect: 'error' }).then(function (response) {
-      if (!response.ok) throw new Error('The qualified Blender command adapter is missing.');
+      if (!response.ok) throw new Error(missing);
       return response.arrayBuffer();
     }).then(function (buffer) {
-      if (state.terminal || buffer.byteLength < 100 || buffer.byteLength > 64 * 1024) throw new Error('The Blender command adapter could not be loaded.');
-      memfs.putReadOnly('automation/bootstrap.py', new Uint8Array(buffer));
-      // Only this manifest-pinned pack script runs. Uploaded scripts remain off.
-      state.bargs = Object.freeze(['--disable-autoexec', MOUNT_PATH + '/' + memfs.openKey(),
-        '--python', MOUNT_PATH + '/automation/bootstrap.py']);
-      state.commandTimer = setInterval(pollCommand, 1000);
+      if (state.terminal || buffer.byteLength < 100 || buffer.byteLength > 64 * 1024) throw new Error(invalid);
+      memfs.putReadOnly(key, new Uint8Array(buffer));
+      return MOUNT_PATH + '/' + key;
+    });
+  }
+
+  // Every session, a person's or an AI command session, runs the session guard
+  // (session.py: interface previews that would hang this build are never started).
+  // The command adapter joins it only when the broker granted the command protocol.
+  function prepareSessionScripts() {
+    if (state.commandProtocol && !state.commandWindow) return Promise.reject(new Error('The engine command handshake is incomplete.'));
+    if (typeof fetch !== 'function') return Promise.reject(new Error('The Blender session guard could not be loaded.'));
+    return loadPackScript('bosonoo/session.py', 'runtime/session.py', 'The Blender session guard is missing from this pack.',
+      'The Blender session guard could not be loaded.').then(function (guard) {
+      var args = ['--disable-autoexec', MOUNT_PATH + '/' + memfs.openKey(), '--python', guard];
+      if (!state.commandProtocol) {
+        state.bargs = Object.freeze(args);
+        return undefined;
+      }
+      return loadPackScript('bosonoo/automation.py', 'automation/bootstrap.py', 'The qualified Blender command adapter is missing.',
+        'The Blender command adapter could not be loaded.').then(function (adapter) {
+        state.bargs = Object.freeze(args.concat(['--python', adapter]));
+        state.commandTimer = setInterval(pollCommand, 1000);
+      });
     });
   }
 
@@ -1287,10 +1318,20 @@
     });
   }
 
+  // Staged image formats: the server's MIME, the mailbox format name and suffix, and
+  // the container signature (automation.py IMAGE_FORMATS repeats the last two).
+  var COMMAND_IMAGES = {
+    'image/png': { format: 'png', suffix: 'png', signature: [137, 80, 78, 71, 13, 10, 26, 10] },
+    'image/jpeg': { format: 'jpeg', suffix: 'jpg', signature: [255, 216, 255] }
+  };
+
   function prepareCommandAsset(command) {
     if (command.action !== 'blender.image.import') return Promise.resolve();
     var asset = command.asset;
-    if (!asset || asset.mime !== 'image/png' || !/^[A-Za-z0-9_-]{1,96}$/.test(asset.key || '')
+    var image = asset && Object.prototype.hasOwnProperty.call(COMMAND_IMAGES, asset.mime) ? COMMAND_IMAGES[asset.mime] : null;
+    // Only a person's command may carry a JPEG; a BChat image stays PNG.
+    if (!image || (image.format !== 'png' && command.actor !== 'person')
+        || (command.params.format || 'png') !== image.format || !/^[A-Za-z0-9_-]{1,96}$/.test(asset.key || '')
         || !Number.isSafeInteger(asset.bytes) || asset.bytes < 8 || asset.bytes > 8 * 1024 * 1024
         || !/^[0-9a-f]{64}$/.test(asset.sha256 || '') || asset.key !== command.command_id || command.params.asset_key !== asset.key
         || command.params.sha256 !== asset.sha256) return Promise.reject(new Error('ENGINE_ASSET_INVALID'));
@@ -1306,8 +1347,8 @@
         bytes.set(reply.bytes, offset); offset += m.size;
         if (offset < bytes.length) return read();
         return sha256Hex(bytes).then(function (digest) {
-          if (digest !== asset.sha256 || Array.from(bytes.slice(0, 8)).join(',') !== '137,80,78,71,13,10,26,10') throw new Error('ENGINE_ASSET_DIGEST_MISMATCH');
-          memfs.putReadOnly('automation/assets/' + asset.key + '.png', bytes);
+          if (digest !== asset.sha256 || Array.from(bytes.slice(0, image.signature.length)).join(',') !== image.signature.join(',')) throw new Error('ENGINE_ASSET_DIGEST_MISMATCH');
+          memfs.putReadOnly('automation/assets/' + asset.key + '.' + image.suffix, bytes);
         });
       });
     }
@@ -1389,10 +1430,14 @@
       command = reply.message.command;
       if (!command) return;
       if (command.window_id !== state.commandWindow || !/^[A-Za-z0-9_-]{1,96}$/.test(command.command_id || '')
-          || typeof command.claim_token !== 'string' || typeof command.action !== 'string') throw new Error('ENGINE_COMMAND_INVALID');
+          || typeof command.claim_token !== 'string' || typeof command.action !== 'string'
+          || (command.actor !== undefined && command.actor !== 'person')) throw new Error('ENGINE_COMMAND_INVALID');
       var deadline = Math.min(Date.now() + 180000, Number(command.expires_ts) * 1000);
       if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('ENGINE_COMMAND_EXPIRED');
       var request = { command_id: command.command_id, operation: command.action, args: command.params };
+      // The session holder's own Bosonoo bar action: the adapter applies it to the
+      // scene as it is now and admits only its two person operations.
+      if (command.actor === 'person') request.actor = 'person';
       var bytes = utf8(JSON.stringify(request));
       if (bytes.length > 48 * 1024) throw new Error('ENGINE_COMMAND_LIMIT');
       return prepareCommandAsset(command).then(function () {
@@ -1425,7 +1470,9 @@
     }).catch(function (error) {
       // The server fences claimed commands. Never repeat native edits after an
       // uncertain dispatch or response, even if the socket later recovers.
-      if (command) setResult('An AI operation needs reconciliation. Keep this editor open; completed edits may still be present.');
+      if (command) setResult(command.actor === 'person'
+        ? 'A Library action did not finish cleanly. Keep this editor open; its change may still be present.'
+        : 'An AI operation needs reconciliation. Keep this editor open; completed edits may still be present.');
     }).then(function () { state.commandBusy = false; });
   }
 
@@ -1721,7 +1768,7 @@
     watchVendorConsole();
     // GPU capability is checked before spending the grant; workspace admission
     // uses the broker's account/project identities and precedes all hydration.
-    checkWebGpu().then(connect).then(recoverPending).then(hydrate).then(prepareAutomation).then(launchWhenReady).then(null, function (err) {
+    checkWebGpu().then(connect).then(recoverPending).then(hydrate).then(prepareSessionScripts).then(launchWhenReady).then(null, function (err) {
       if (!state.terminal) fail('failed', 'Could not open the file in browser Blender', String(err && err.message || err));
     });
   }

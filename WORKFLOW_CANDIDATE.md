@@ -15,7 +15,17 @@ Uploaded scripts remain disabled. The new automation.py is GPL-3.0-or-later.
 The native WebAssembly binary and complete corresponding native source are
 unchanged from blender-5.3.0-alpha-20260921. Both the existing native archive and
 this branch's adapter sources are required to reproduce the new candidate.
-The standalone reproduce_adapter.py now also emits bosonoo/automation.py.
+The standalone reproduce_adapter.py now also emits bosonoo/automation.py and
+bosonoo/session.py. The latter runs in both human and AI sessions and supplies
+bounded swatch previews so opening the Material properties does not enter the
+browser build's synchronous preview-render deadlock. Live preview panels show
+an explanation instead. This is an adapter guard; the native build is unchanged.
+
+Alongside the existing save path, the bridge admits the host's two bounded
+human actions (image import and GLB export) using the claimed command transport.
+It checks the action, actor and parameter shape before native execution; it
+does not accept an arbitrary script or privileged host command. The host's
+Library UI and authorization implementation are deliberately separate.
 
 workflow-candidate-source.json records exact candidate source hashes.
 release-source.json continues to describe the existing published release,

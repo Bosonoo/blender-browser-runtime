@@ -27,6 +27,12 @@ MAX_EXPORT_BYTES = 8 * 1024 * 1024
 MAX_EXPORT_OBJECTS = 64
 MAX_EMISSION_STRENGTH = 100
 PRIMITIVES = ("cube", "plane", "uv_sphere", "cylinder", "cone", "torus", "ico_sphere")
+# The session holder's own requests from the Bosonoo bar ("actor": "person").
+# They act on the scene as it is now, so they carry no scene revision, and only
+# these two operations with these exact fields are accepted.
+PERSON_OPERATIONS = ("blender.image.import", "blender.scene.export_glb")
+# Staged image formats: the bytes' container signature and the scratch suffix.
+IMAGE_FORMATS = {"png": (b"\x89PNG\r\n\x1a\n", "png"), "jpeg": (b"\xff\xd8\xff", "jpg")}
 _NAME = re.compile(r"^[^\x00-\x1f/\\]{1,80}$")
 _KEY = re.compile(r"^[A-Za-z0-9_-]{1,96}$")
 _revision = 1
@@ -56,7 +62,27 @@ def _vector(value, size=3, *, minimum=-10000, maximum=10000):
     return tuple(float(x) for x in value)
 
 
-def validate(operation, args):
+def _asset(args):
+    if not isinstance(args["asset_key"], str) or not _KEY.fullmatch(args["asset_key"]):
+        raise ValueError("Invalid staged asset")
+    if not isinstance(args["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", args["sha256"]):
+        raise ValueError("Invalid asset digest")
+    if args.get("format", "png") not in IMAGE_FORMATS:
+        raise ValueError("Use a PNG or JPEG image")
+    _name(args["name"])
+
+
+def validate(operation, args, *, person=False):
+    if person:
+        if operation not in PERSON_OPERATIONS:
+            raise ValueError("Unsupported Blender operation")
+        if operation == "blender.image.import":
+            _fields(args, ("asset_key", "sha256", "name", "format"), ("asset_key", "sha256", "name"))
+            _asset(args)
+        else:
+            _fields(args, ("name",), ("name",))
+            _name(args["name"])
+        return args
     if operation in {"blender.scene.inspect", "blender.project.save"}:
         _fields(args, ())
         return args
@@ -117,11 +143,7 @@ def validate(operation, args):
     elif operation == "blender.image.import":
         _fields(args, ("expected_scene_revision", "asset_key", "sha256", "name", "object_name"),
                 ("expected_scene_revision", "asset_key", "sha256", "name"))
-        if not isinstance(args["asset_key"], str) or not _KEY.fullmatch(args["asset_key"]):
-            raise ValueError("Invalid staged asset")
-        if not isinstance(args["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", args["sha256"]):
-            raise ValueError("Invalid asset digest")
-        _name(args["name"])
+        _asset(args)
         if "object_name" in args:
             _name(args["object_name"])
     elif operation == "blender.scene.export_glb":
@@ -526,15 +548,16 @@ def _export(bpy, args, command_id):
         **({"exported_objects": [obj.name for obj in chosen]} if chosen else {})}
 
 
-def execute(bpy, operation, args, command_id):
+def execute(bpy, operation, args, command_id, *, person=False):
     global _revision, _busy
-    validate(operation, args)
+    validate(operation, args, person=person)
     if operation == "blender.scene.inspect":
         return inspect(bpy)
     if operation == "blender.project.save":
         # JS asks the native serializer and resolves only after a Library receipt.
         return {"execution": "native_save_required", "scene_revision": _revision}
-    if args["expected_scene_revision"] != _revision:
+    # A person's request is the scene as they see it now; a model's plan must be current.
+    if not person and args["expected_scene_revision"] != _revision:
         raise ValueError("SCENE_REVISION_CONFLICT: inspect the current scene before editing")
     if bpy.context.mode != "OBJECT":
         raise ValueError("Return Blender to Object Mode before requesting this operation")
@@ -624,11 +647,12 @@ def execute(bpy, operation, args, command_id):
                     bpy.data.meshes.remove(mesh)
         else:
             target = _object(bpy, args["object_name"]) if "object_name" in args else None
-            asset_path = f"{ROOT}/assets/{args['asset_key']}.png"
+            signature, suffix = IMAGE_FORMATS[args.get("format", "png")]
+            asset_path = f"{ROOT}/assets/{args['asset_key']}.{suffix}"
             with open(asset_path, "rb") as handle:
                 raw = handle.read(8 * 1024 * 1024 + 1)
-            if len(raw) > 8 * 1024 * 1024 or not raw.startswith(b"\x89PNG\r\n\x1a\n") or hashlib.sha256(raw).hexdigest() != args["sha256"]:
-                raise ValueError("Staged PNG does not match the approved asset")
+            if len(raw) > 8 * 1024 * 1024 or not raw.startswith(signature) or hashlib.sha256(raw).hexdigest() != args["sha256"]:
+                raise ValueError("Staged image does not match the approved asset")
             imported = bpy.data.images.load(asset_path, check_existing=False)
             imported.name = args["name"]
             imported.pack()
@@ -642,7 +666,7 @@ def execute(bpy, operation, args, command_id):
         # Direct bpy data edits do not mark Main dirty. A fixed editor undo
         # boundary records the user's recoverable change and triggers Blender's
         # native dirty state, which the existing autosave adapter observes.
-        if "FINISHED" not in bpy.ops.ed.undo_push(message="Bosonoo AI edit"):
+        if "FINISHED" not in bpy.ops.ed.undo_push(message="Add image from Library" if person else "Bosonoo AI edit"):
             raise RuntimeError("Blender could not record this edit for saving")
         _revision += 1
         return {"scene_revision": _revision, "changed": True, "created_objects": [obj.name for obj in created_objects],
@@ -711,10 +735,11 @@ def start():
             if len(raw) > MAX_REQUEST_BYTES:
                 return 0.25
             request = json.loads(raw)
-            _fields(request, ("command_id", "operation", "args"), ("command_id", "operation", "args"))
+            _fields(request, ("command_id", "operation", "args", "actor"), ("command_id", "operation", "args"))
             key = request["command_id"]
-            if not isinstance(key, str) or not _KEY.fullmatch(key):
+            if not isinstance(key, str) or not _KEY.fullmatch(key) or request.get("actor", "person") != "person":
                 return 0.25
+            person = "actor" in request
             digest = hashlib.sha256(raw).hexdigest()
             if key in _completed:
                 prior_hash, result = _completed[key]
@@ -727,7 +752,7 @@ def start():
                 _write({"command_id": key, "ok": False, "error": "SESSION_COMMAND_LIMIT"}, seq)
                 return 0.25
             try:
-                result = {"command_id": key, "ok": True, "data": execute(bpy, request["operation"], request["args"], key)}
+                result = {"command_id": key, "ok": True, "data": execute(bpy, request["operation"], request["args"], key, person=person)}
             except (ValueError, RuntimeError) as error:
                 result = {"command_id": key, "ok": False, "error": str(error)[:240], "scene_revision": _revision}
             except Exception:
