@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bosonoo · Blender 5.3 alpha (browser, experimental)</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<!-- Browser-owned guest editor. No Library or account authority. -->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0b0d11; color: #e6e9ef;
+    font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    height: 100vh; overflow: hidden;
+  }
+  #splash {
+    position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+    background: radial-gradient(circle at 50% 22%, #161b24 0, #0b0d11 60%);
+    padding: 24px; overflow: auto;
+  }
+  #splash[hidden] { display: none !important; }
+  /* The vendor bundle never hides the splash itself: on its WGPU_FIRST_CONTENT log
+     line it adds "done" to #splash and "ready" to the canvas and leaves the styling
+     to the page. Part of the DOM contract. */
+  #splash.done { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .3s ease; }
+  canvas#canvas.ready { cursor: default; }
+  .stage { width: 100%; display: grid; place-items: center; }
+  .card {
+    width: min(720px, 100%); border: 1px solid #232a36; border-radius: 12px;
+    background: #11141a; padding: 22px 24px;
+  }
+  h1 { margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }
+  .sub { margin: 0 0 16px; color: #8b95a7; font-size: 12px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px;
+    font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    background: #2a1d0c; color: #f2a63d; border: 1px solid #5a3a12; margin-left: 8px; vertical-align: middle;
+  }
+  .progress-track { height: 6px; border-radius: 999px; background: #1a1f28; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0; background: linear-gradient(90deg, #e87d0d, #f2a63d); transition: width .25s; }
+  .progress-meta { display: flex; justify-content: space-between; margin-top: 7px; color: #8b95a7; font-size: 11px; }
+  #splash-status { margin: 10px 0 0; color: #b7c0cf; font-size: 12px; }
+  .bosonoo-lines { margin: 14px 0 0; padding: 10px 12px; border: 1px solid #1d2431; border-radius: 8px; background: #0e1117; }
+  .bosonoo-lines p { margin: 0; font-size: 12px; color: #cfd6e2; }
+  .bosonoo-lines p + p { margin-top: 4px; color: #8b95a7; }
+  /* Launch is automatic once the file is loaded and the vendor download is done; a
+     manual click before that would boot Blender without the Bosonoo file. The vendor
+     button stays in the DOM because the bundle looks it up and the bridge clicks it. */
+  #start-btn { display: none; }
+  .gpu-warn { border: 1px solid #5a3a12; background: #1a1408; color: #e8c07d; padding: 9px 11px; border-radius: 8px; margin-top: 14px; font-size: 12px; }
+  .gpu-warn p { margin: 0; }
+  .gpu-ack { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .console-box {
+    margin-top: 16px; max-height: 190px; overflow: auto; padding: 9px 11px;
+    border: 1px solid #1d2431; border-radius: 8px; background: #0c0f14;
+    font: 11px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+    color: #8b95a7; white-space: pre-wrap; word-break: break-word;
+  }
+  .facts { margin: 14px 0 0; padding: 0; list-style: none; color: #8b95a7; font-size: 11px; }
+  .facts li { padding: 2px 0; }
+  .facts b { color: #cfd6e2; font-weight: 600; }
+  canvas#canvas { display: block; width: 100vw; height: 100vh; background: #0b0d11; outline: none; }
+  #guest-controls { position: fixed; z-index: 20; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px; max-width: calc(100vw - 16px); }
+  #guest-controls button { border: 1px solid #586477; border-radius: 6px; padding: 5px 8px; background: #151c28; color: #e6e9ef; font: inherit; cursor: pointer; }
+  #guest-notice { max-width: 470px; padding: 6px 10px; background: #432018; color: #fff0e8; border-radius: 6px; }
+</style>
+<script src="bosonoo/guest-primitives.js"></script>
+<script src="bosonoo/guest-resource.js"></script>
+<script src="bosonoo/guest.js"></script>
+</head>
+<body>
+
+<!--
+  DOM CONTRACT of the vendor entry module (checked at pack-build time): getElementById
+  of canvas, console-output, gpu-ack, gpu-ack-row, gpu-warning, gpu-warning-text,
+  progress-fill, progress-percent, progress-phase, splash, splash-shell, splash-status,
+  stage-card, start-btn; querySelector of .progress-track and .stage. It writes
+  dataset.phase on splash-shell, stage-card and .stage; a missing one throws before the
+  download starts and the page sits on "Preparing" with no network activity.
+-->
+<section id="splash">
+  <main class="stage">
+  <div id="splash-shell" class="card" data-phase="loading">
+    <h1>Blender 5.3 <span class="badge">alpha · experimental</span></h1>
+    <!--
+      Nothing static on this page says where a save lands: the anchor may itself be a
+      browser copy, which this build saves in place. The one live line below is written
+      by the bridge from the save target Bosonoo names in engine.connected.
+    -->
+    <p class="sub">
+      Browser Blender compiled to WebAssembly with a WebGPU backend, running on this machine.
+      Desktop Blender 5.2 cannot open files this build saves, so a save from this window
+      uses a browser copy and retains the imported original.
+    </p>
+
+    <div id="stage-card" class="launch-panel" data-phase="loading">
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+      <div class="progress-meta">
+        <span id="progress-phase">Preparing</span>
+        <span id="progress-percent"></span>
+      </div>
+      <p id="splash-status">Preparing Blender&hellip;</p>
+    </div>
+
+    <div class="bosonoo-lines" aria-live="polite">
+      <p id="bosonoo-status">Opening your browser-owned file&hellip;</p>
+      <p id="bosonoo-target">Edits stay in this browser until you download or explicitly import them.</p>
+    </div>
+
+    <div id="gpu-warning" class="gpu-warn" hidden>
+      <p id="gpu-warning-text"></p>
+      <label id="gpu-ack-row" class="gpu-ack" hidden>
+        <input type="checkbox" id="gpu-ack" disabled>
+        <span>Software rendering is not offered from Bosonoo.</span>
+      </label>
+    </div>
+
+    <button id="start-btn" type="button" disabled>Launch Blender</button>
+
+    <ul class="facts">
+      <li><b>Needs</b> WebGPU with a hardware adapter and a cross-origin isolated window</li>
+      <li><b>Payload</b> 23 MB wasm + 36 MB assets compressed, about 212 MB in memory</li>
+      <li><b>Licence</b> GPL (see NOTICE.txt); development pack, not reviewed</li>
+    </ul>
+
+    <div id="console-output" class="console-box" role="log" aria-label="Startup console"></div>
+  </div>
+  </main>
+</section>
+
+<canvas id="canvas" width="1536" height="864" tabindex="0"></canvas>
+
+<script type="module" src="assets/index-VENDORHASH.js"></script>
+</body>
+</html>

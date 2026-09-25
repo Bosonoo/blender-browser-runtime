@@ -51,6 +51,10 @@ rebuilt independently.
 
 ## License and attribution
 
+The [unreleased guest candidate](GUEST_CANDIDATE.md) supplies a separate,
+browser-local MessagePort adapter. It uses the same native source archive and
+has its own standalone reproduction script; it is not a hosted release.
+
 The Blender integration contributions in this repository are available under
 **GPL-3.0-or-later**. Upstream files retain their individual license and copyright
 notices. See [LICENSING.md](LICENSING.md), [COPYING](COPYING) and [NOTICE.txt](NOTICE.txt).

@@ -12,7 +12,9 @@
  *   3. open the WebSocket to window.BOSONOO_BROKER_WS and send engine.connect;
  *   4. hydrate the single .blend into the in-memory provider that Blender mounts at
  *      /bosonoo, verifying its byte count and SHA-256;
- *   5. window.__BARGS = ['/bosonoo/workspace/<safeName>'] and nothing else;
+ *   5. window.__BARGS = ['--disable-autoexec', '/bosonoo/workspace/<safeName>',
+ *      '--python', '/bosonoo/runtime/session.py'] (the pack's session guard), plus
+ *      the pack's command adapter when the broker granted the command protocol;
  *   6. launch through the vendor Launch button once the file is loaded and the
  *      vendor download is done;
  *   7. a provider write or rename that lands on the open file is the user's save
@@ -220,6 +222,7 @@
     var opts = options || {};
     var files = new Map();
     var dirs = new Map();
+    var readOnly = new Set();
     dirs.set('', true);
     var openKey = '';
 
@@ -286,6 +289,7 @@
       },
       writeFile: function (path, data) {
         try {
+          if (readOnly.has(normaliseKey(path))) throw new Error('This pack file is read-only.');
           noteWrite(putFile(path, data));
           return Promise.resolve(undefined);
         } catch (err) {
@@ -298,12 +302,14 @@
         return Promise.resolve(undefined);
       },
       unlink: function (path) {
+        if (readOnly.has(normaliseKey(path))) return Promise.reject(new Error('This pack file is read-only.'));
         files.delete(normaliseKey(path));
         return Promise.resolve(undefined);
       },
       rename: function (from, to) {
         var a = normaliseKey(from);
         var b = normaliseKey(to);
+        if (readOnly.has(a) || readOnly.has(b)) return Promise.reject(new Error('This pack file is read-only.'));
         if (!files.has(a)) return Promise.reject(new Error('bosonoo-fs: no such file'));
         if (a === b) return Promise.resolve(undefined);
         var bytes = files.get(a);
@@ -322,6 +328,13 @@
       files: files,
       dirs: dirs,
       putFile: putFile,
+      putReadOnly: function (path, data) { var key = putFile(path, data); readOnly.add(key); },
+      releaseCommandBuffers: function (id) {
+        if (!/^[A-Za-z0-9_-]{1,96}$/.test(id || '')) throw new Error('Invalid command buffer identity.');
+        ['automation/assets/' + id + '.png', 'automation/assets/' + id + '.jpg', 'automation/outputs/' + id + '.glb'].forEach(function (key) {
+          files.delete(key); readOnly.delete(key);
+        });
+      },
       setOpenKey: function (key) { openKey = normaliseKey(key); },
       openKey: function () { return openKey; },
       read: function (key) { return files.get(normaliseKey(key)) || null; }
@@ -424,6 +437,10 @@
   state.editorReadyReporting = false;
   state.cloudSaveError = false;
   state.uncertainSnapshot = null;
+  state.commandProtocol = false;
+  state.commandBusy = false;
+  state.commandTimer = null;
+  state.lastSnapshotOutcome = null;
 
   function log() {
     var parts = Array.prototype.slice.call(arguments).map(String);
@@ -437,8 +454,9 @@
     }
   });
 
-  // argv: exactly the hydrated file's absolute path once armed; nothing else, ever.
-  // An accessor so no other script can append --python, an add-on or a config.
+  // argv: the hydrated file's absolute path and the manifest-pinned pack scripts
+  // (prepareSessionScripts); nothing else, ever. An accessor so no other script can
+  // append --python, an add-on or a config.
   var EMPTY_ARGS = Object.freeze([]);
   function defineLocked(name, descriptor) {
     try {
@@ -773,6 +791,9 @@
   function targetLine() {
     var target = state.saveTarget;
     if (!target || !target.name) return 'Bosonoo will say where a save from this window goes.';
+    if (target.kind === 'in_place' && target.starter) {
+      return 'Saves go straight into ' + target.name + '. Desktop Blender 5.2 cannot open browser saves.';
+    }
     if (target.kind === 'in_place') {
       return 'This is a browser Blender copy. Saves replace ' + target.name + '. Desktop Blender 5.2 cannot open it.';
     }
@@ -956,7 +977,7 @@
         fail('failed', 'Protocol error', 'The broker sent a frame without a type.');
         return;
       }
-      if (message.type === 'hydrate.chunk') {
+      if (message.type === 'hydrate.chunk' || message.type === 'command.asset.chunk') {
         state.expectBinaryFor = message;
         return;
       }
@@ -976,7 +997,9 @@
     if (!value || typeof value !== 'object') return null;
     var kind = value.kind === 'in_place' ? 'in_place' : (value.kind === 'browser_copy' ? 'browser_copy' : '');
     var name = typeof value.name === 'string' ? value.name : '';
-    return kind && name ? { kind: kind, name: name } : null;
+    if (!kind || !name) return null;
+    // A Bosonoo blank starter is saved into directly; it is nobody's copy.
+    return kind === 'in_place' && value.starter === true ? { kind: kind, name: name, starter: true } : { kind: kind, name: name };
   }
 
   function connect() {
@@ -999,7 +1022,7 @@
       var opened = false;
       ws.onopen = function () {
         opened = true;
-        exchange({ type: 'engine.connect', grant: grant, protocol: PROTOCOL, editor_ready_reporting: true }, ['engine.connected'], CONNECT_TIMEOUT_MS)
+        exchange({ type: 'engine.connect', grant: grant, protocol: PROTOCOL, editor_ready_reporting: true, command_protocol: 1 }, ['engine.connected'], CONNECT_TIMEOUT_MS)
           .then(function (reply) {
             grant = '';
             var m = reply.message;
@@ -1024,6 +1047,8 @@
               state.recoveryPage = m;
               state.saveTarget = readSaveTarget(m.save_target);
               state.editorReadyReporting = m.editor_ready_reporting === true;
+              state.commandProtocol = m.command_protocol === 1;
+              state.commandWindow = state.commandProtocol ? String(m.window_id || '') : '';
               try { document.title = state.session.project_name + ' — Bosonoo Blender (alpha)'; } catch (err) { /* ignore */ }
               setPhase('connected');
               startPing();
@@ -1110,7 +1135,12 @@
     if (m.type === 'snapshot.saved') {
       var target = m.target && typeof m.target === 'object' ? m.target : null;
       var name = target && typeof target.name === 'string' && target.name ? target.name : '';
-      if (target && target.kind && name) state.saveTarget = { kind: target.kind === 'in_place' ? 'in_place' : 'browser_copy', name: name };
+      if (target && target.kind && name) {
+        var kind = target.kind === 'in_place' ? 'in_place' : 'browser_copy';
+        // Receipts name the kind only; a starter stays a starter.
+        var starter = kind === 'in_place' && Boolean(state.saveTarget && state.saveTarget.starter);
+        state.saveTarget = starter ? { kind: kind, name: name, starter: true } : { kind: kind, name: name };
+      }
       return name ? 'Saved to ' + name : 'Saved to Bosonoo';
     }
     if (m.type === 'snapshot.failed') return 'Save failed — ' + String(m.message || m.code || 'unknown') + '. Press Ctrl+S to retry; your saved browser copy is retained.';
@@ -1206,6 +1236,246 @@
   }
 
   // --- 6. launch -----------------------------------------------------------
+  // A manifest-pinned pack script, read-only in the provider. Only these run;
+  // scripts inside the .blend stay off (--disable-autoexec).
+  function loadPackScript(url, key, missing, invalid) {
+    return fetch(new URL(url, window.location.href).href,
+      { credentials: 'omit', cache: 'force-cache', redirect: 'error' }).then(function (response) {
+      if (!response.ok) throw new Error(missing);
+      return response.arrayBuffer();
+    }).then(function (buffer) {
+      if (state.terminal || buffer.byteLength < 100 || buffer.byteLength > 64 * 1024) throw new Error(invalid);
+      memfs.putReadOnly(key, new Uint8Array(buffer));
+      return MOUNT_PATH + '/' + key;
+    });
+  }
+
+  // Every session, a person's or an AI command session, runs the session guard
+  // (session.py: interface previews that would hang this build are never started).
+  // The command adapter joins it only when the broker granted the command protocol.
+  function prepareSessionScripts() {
+    if (state.commandProtocol && !state.commandWindow) return Promise.reject(new Error('The engine command handshake is incomplete.'));
+    if (typeof fetch !== 'function') return Promise.reject(new Error('The Blender session guard could not be loaded.'));
+    return loadPackScript('bosonoo/session.py', 'runtime/session.py', 'The Blender session guard is missing from this pack.',
+      'The Blender session guard could not be loaded.').then(function (guard) {
+      var args = ['--disable-autoexec', MOUNT_PATH + '/' + memfs.openKey(), '--python', guard];
+      if (!state.commandProtocol) {
+        state.bargs = Object.freeze(args);
+        return undefined;
+      }
+      return loadPackScript('bosonoo/automation.py', 'automation/bootstrap.py', 'The qualified Blender command adapter is missing.',
+        'The Blender command adapter could not be loaded.').then(function (adapter) {
+        state.bargs = Object.freeze(args.concat(['--python', adapter]));
+        state.commandTimer = setInterval(pollCommand, 1000);
+      });
+    });
+  }
+
+  // The runtime's file layer keeps bytes it already read from a path, so a rewritten
+  // request file reads back as old-prefix + new-suffix. Each command therefore goes to a
+  // new in-N.json in the in-memory filesystem and its answer to a new out-N.json
+  // (automation.py LIVE_ROOT); the mount inbox remains for desktop Blender.
+  var LIVE_MAILBOX = '/tmp/bosonoo-automation';
+  function writeLiveInbox(bytes) {
+    var fs = moduleValue && moduleValue.FS;
+    if (!state.liveMailboxLogged) {
+      state.liveMailboxLogged = true;
+      console.log('[bosonoo-engine] live command mailbox ' + (fs && typeof fs.writeFile === 'function' ? 'available' : 'unavailable'));
+    }
+    if (!fs || typeof fs.writeFile !== 'function' || typeof fs.rename !== 'function') return 0;
+    var seq = (state.liveSeq || 0) + 1;
+    try {
+      try { fs.mkdirTree(LIVE_MAILBOX); } catch (err) { /* exists */ }
+      fs.writeFile(LIVE_MAILBOX + '/in-' + seq + '.tmp', bytes);
+      fs.rename(LIVE_MAILBOX + '/in-' + seq + '.tmp', LIVE_MAILBOX + '/in-' + seq + '.json');
+    } catch (err) { return 0; }
+    state.liveSeq = seq;
+    return seq;
+  }
+
+  function readLiveResult(seq) {
+    var fs = moduleValue && moduleValue.FS;
+    if (!seq || !fs || typeof fs.readFile !== 'function') return null;
+    try { return fs.readFile(LIVE_MAILBOX + '/out-' + seq + '.json'); } catch (err) { return null; }
+  }
+
+  function mailboxResult(commandId, deadline, seq) {
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (state.terminal) { reject(new Error('ENGINE_DISCONNECTED')); return; }
+        var sources = [readLiveResult(seq), memfs.read('automation/outbox.json')];
+        for (var i = 0; i < sources.length; i += 1) {
+          var raw = sources[i];
+          if (!raw || raw.length > 64 * 1024) continue;
+          try {
+            var value = JSON.parse(new TextDecoder().decode(raw));
+            if (value.command_id === commandId) { resolve(value); return; }
+          } catch (err) { /* A partial native write is not a result. */ }
+        }
+        if (Date.now() > deadline) { reject(new Error('ENGINE_COMMAND_OUTCOME_UNKNOWN')); return; }
+        setTimeout(poll, 100);
+      })();
+    });
+  }
+
+  // Staged image formats: the server's MIME, the mailbox format name and suffix, and
+  // the container signature (automation.py IMAGE_FORMATS repeats the last two).
+  var COMMAND_IMAGES = {
+    'image/png': { format: 'png', suffix: 'png', signature: [137, 80, 78, 71, 13, 10, 26, 10] },
+    'image/jpeg': { format: 'jpeg', suffix: 'jpg', signature: [255, 216, 255] }
+  };
+
+  function prepareCommandAsset(command) {
+    if (command.action !== 'blender.image.import') return Promise.resolve();
+    var asset = command.asset;
+    var image = asset && Object.prototype.hasOwnProperty.call(COMMAND_IMAGES, asset.mime) ? COMMAND_IMAGES[asset.mime] : null;
+    // Only a person's command may carry a JPEG; a BChat image stays PNG.
+    if (!image || (image.format !== 'png' && command.actor !== 'person')
+        || (command.params.format || 'png') !== image.format || !/^[A-Za-z0-9_-]{1,96}$/.test(asset.key || '')
+        || !Number.isSafeInteger(asset.bytes) || asset.bytes < 8 || asset.bytes > 8 * 1024 * 1024
+        || !/^[0-9a-f]{64}$/.test(asset.sha256 || '') || asset.key !== command.command_id || command.params.asset_key !== asset.key
+        || command.params.sha256 !== asset.sha256) return Promise.reject(new Error('ENGINE_ASSET_INVALID'));
+    var bytes = new Uint8Array(asset.bytes);
+    var offset = 0;
+    function read() {
+      return exchange({ type: 'command.asset.read', command_id: command.command_id, claim_token: command.claim_token,
+        offset: offset, max_bytes: Math.min(256 * 1024, bytes.length - offset) }, ['command.asset.chunk']).then(function (reply) {
+        var m = reply.message;
+        if (m.offset !== offset || m.sha256 !== asset.sha256 || !reply.bytes || m.size !== reply.bytes.length
+            || m.size < 1 || m.size > 256 * 1024 || offset + m.size > bytes.length
+            || m.eof !== (offset + m.size === bytes.length)) throw new Error('ENGINE_ASSET_CHANGED');
+        bytes.set(reply.bytes, offset); offset += m.size;
+        if (offset < bytes.length) return read();
+        return sha256Hex(bytes).then(function (digest) {
+          if (digest !== asset.sha256 || Array.from(bytes.slice(0, image.signature.length)).join(',') !== image.signature.join(',')) throw new Error('ENGINE_ASSET_DIGEST_MISMATCH');
+          memfs.putReadOnly('automation/assets/' + asset.key + '.' + image.suffix, bytes);
+        });
+      });
+    }
+    return read();
+  }
+
+  function saveCommandChanges(deadline, command) {
+    return new Promise(function (resolve, reject) {
+      if (!state.autosave || !moduleValue) { reject(new Error('NATIVE_SAVE_UNAVAILABLE')); return; }
+      try {
+        if (moduleValue.ccall('blender_bosonoo_save_current', 'number', [], []) !== 1) throw new Error('Native save refused');
+      } catch (error) { reject(error); return; }
+      (function poll() {
+        if (state.terminal || Date.now() > deadline) { reject(new Error('SAVE_OUTCOME_UNKNOWN')); return; }
+        var status;
+        try { status = moduleValue.ccall('blender_bosonoo_autosave_status', 'number', [], []); }
+        catch (error) { reject(error); return; }
+        if (status === 6 || status === 7) { reject(new Error('NATIVE_SAVE_FAILED')); return; }
+        if (status !== 2 || state.saving || state.waiter) { setTimeout(poll, 100); return; }
+        if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+        Promise.resolve(requestSnapshot(command)).then(function (outcome) {
+          if (!outcome || outcome.type !== 'snapshot.saved') throw new Error('SAVE_UNCONFIRMED');
+          resolve(outcome);
+        }).catch(reject);
+      })();
+    });
+  }
+
+  function stageCommandOutput(command, value) {
+    if (command.action !== 'blender.scene.export_glb' || value.ok !== true) return Promise.resolve(value);
+    var output = value.data && value.data.output;
+    if (!output || output.key !== command.command_id || output.mime !== 'model/gltf-binary'
+        || !Number.isSafeInteger(output.bytes) || output.bytes < 20 || output.bytes > 8 * 1024 * 1024
+        || !/^[0-9a-f]{64}$/.test(output.sha256 || '')) return Promise.reject(new Error('ENGINE_OUTPUT_INVALID'));
+    var bytes = memfs.read('automation/outputs/' + command.command_id + '.glb');
+    if (!bytes || bytes.length !== output.bytes) return Promise.reject(new Error('ENGINE_OUTPUT_MISSING'));
+    var offset = 0;
+    function chunk() {
+      var end = Math.min(offset + 256 * 1024, bytes.length);
+      var promise = expect(['command.output.progress']);
+      send({ type: 'command.output.chunk', command_id: command.command_id, claim_token: command.claim_token,
+        offset: offset, bytes: end - offset });
+      state.ws.send(bytes.slice(offset, end));
+      return promise.then(function (reply) {
+        if (reply.message.command_id !== command.command_id || reply.message.offset !== end) throw new Error('ENGINE_OUTPUT_OFFSET');
+        offset = end;
+        if (offset < bytes.length) return chunk();
+        return exchange({ type: 'command.output.final', command_id: command.command_id,
+          claim_token: command.claim_token }, ['command.output.staged']).then(function (reply) {
+          var m = reply.message;
+          if (m.command_id !== command.command_id || m.bytes !== bytes.length || m.sha256 !== output.sha256
+              || m.mime !== 'model/gltf-binary' || m.state !== 'staged' || typeof m.name !== 'string') throw new Error('ENGINE_OUTPUT_RECEIPT');
+          // This is a private staging receipt. Only the BChat's current server
+          // authority can commit it to the Library and report a saved artifact.
+          value.output_stage = { command_id: m.command_id, bytes: m.bytes, sha256: m.sha256,
+            name: m.name, mime: m.mime, state: m.state };
+          value.data.persistence = 'private_staging_pending_library_commit';
+          return value;
+        });
+      });
+    }
+    return sha256Hex(bytes).then(function (digest) {
+      if (digest !== output.sha256) throw new Error('ENGINE_OUTPUT_CHANGED');
+      return exchange({ type: 'command.output.begin', command_id: command.command_id,
+        claim_token: command.claim_token, bytes: bytes.length, sha256: output.sha256 }, ['command.output.accepted']);
+    }).then(function (reply) {
+      if (reply.message.command_id !== command.command_id || reply.message.max_chunk_bytes !== 262144) throw new Error('ENGINE_OUTPUT_PROTOCOL');
+      return chunk();
+    });
+  }
+
+  function pollCommand() {
+    if (!state.commandProtocol || state.terminal || state.phase !== 'running' || state.commandBusy || state.waiter || state.saving || state.saveTimer) return;
+    var ready = memfs.read('automation/outbox.json');
+    if (!ready) return;
+    state.commandBusy = true;
+    var command = null;
+    exchange({ type: 'command.poll', request_id: randomId('poll_') }, ['command.next']).then(function (reply) {
+      command = reply.message.command;
+      if (!command) return;
+      if (command.window_id !== state.commandWindow || !/^[A-Za-z0-9_-]{1,96}$/.test(command.command_id || '')
+          || typeof command.claim_token !== 'string' || typeof command.action !== 'string'
+          || (command.actor !== undefined && command.actor !== 'person')) throw new Error('ENGINE_COMMAND_INVALID');
+      var deadline = Math.min(Date.now() + 180000, Number(command.expires_ts) * 1000);
+      if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('ENGINE_COMMAND_EXPIRED');
+      var request = { command_id: command.command_id, operation: command.action, args: command.params };
+      // The session holder's own Bosonoo bar action: the adapter applies it to the
+      // scene as it is now and admits only its two person operations.
+      if (command.actor === 'person') request.actor = 'person';
+      var bytes = utf8(JSON.stringify(request));
+      if (bytes.length > 48 * 1024) throw new Error('ENGINE_COMMAND_LIMIT');
+      return prepareCommandAsset(command).then(function () {
+        memfs.putFile('automation/inbox.json', bytes);
+        return mailboxResult(command.command_id, deadline, writeLiveInbox(bytes));
+      }).then(function (value) {
+        if (!value.ok) return value;
+        if (value.data && (value.data.changed || value.data.execution === 'native_save_required')) {
+          return saveCommandChanges(deadline, command).then(function (receipt) {
+            value.save_receipt = receipt;
+            value.data.save_receipt = receipt;
+            value.data.persistence = 'library_receipt';
+            return value;
+          }).catch(function (error) {
+            return { ok: false, data: value.data, error: String(error.message || 'SAVE_UNCONFIRMED'), memory_changed: !!value.data.changed };
+          });
+        }
+        return value;
+      }).then(function (value) { return stageCommandOutput(command, value); }).then(function (value) {
+        return exchange({ type: 'command.result', command_id: command.command_id, claim_token: command.claim_token,
+          status: value.ok === true ? 'succeeded' : 'failed', result: value }, ['command.receipt']).then(function (reply) {
+          if (reply.message.command_id !== command.command_id) throw new Error('ENGINE_COMMAND_RECEIPT');
+          // Retain uncertain native output. Once Bosonoo records this exact
+          // result, its private stage owns exported bytes; packed images live
+          // in the editable scene. Only fixed per-command scratch is released.
+          if (value.ok === true) memfs.releaseCommandBuffers(command.command_id);
+          return reply;
+        });
+      });
+    }).catch(function (error) {
+      // The server fences claimed commands. Never repeat native edits after an
+      // uncertain dispatch or response, even if the socket later recovers.
+      if (command) setResult(command.actor === 'person'
+        ? 'A Library action did not finish cleanly. Keep this editor open; its change may still be present.'
+        : 'An AI operation needs reconciliation. Keep this editor open; completed edits may still be present.');
+    }).then(function () { state.commandBusy = false; });
+  }
+
   function gpuWarningText() {
     var warning = document.getElementById('gpu-warning');
     if (!warning || warning.hidden) return '';
@@ -1317,7 +1587,7 @@
     }, SAVE_DEBOUNCE_MS);
   }
 
-  function requestSnapshot() {
+  function requestSnapshot(command) {
     if (state.terminal || !state.launched) return;
     state.hasUncommittedSave = true;
     if (state.saving) { state.dirtyWhileSaving = true; return; }
@@ -1334,12 +1604,14 @@
     state.cloudSaveError = false;
     state.dirtyWhileSaving = false;
     setResult('');
-    buildSnapshot(state.relativePath, bytes).then(runSnapshotExchange).then(function (outcome) {
+    return buildSnapshot(state.relativePath, bytes).then(function (built) { return runSnapshotExchange(built, command); }).then(function (outcome) {
       state.saving = false;
       state.hasUncommittedSave = outcome.type !== 'snapshot.saved' || state.dirtyWhileSaving;
       state.cloudSaveError = outcome.type !== 'snapshot.saved';
       setResult(describeOutcome(outcome));
       if (state.dirtyWhileSaving) scheduleSnapshot();
+      state.lastSnapshotOutcome = outcome;
+      return outcome;
     }, function (err) {
       state.saving = false;
       state.cloudSaveError = true;
@@ -1389,8 +1661,13 @@
     });
   }
 
-  function runSnapshotExchange(built) {
-    return exchange({ type: 'snapshot.propose' }, ['snapshot.request']).then(function (reply) {
+  function runSnapshotExchange(built, command) {
+    var proposal = { type: 'snapshot.propose' };
+    if (command && typeof command.command_id === 'string' && typeof command.claim_token === 'string') {
+      proposal.command_id = command.command_id;
+      proposal.claim_token = command.claim_token;
+    }
+    return exchange(proposal, ['snapshot.request']).then(function (reply) {
       var requestId = String(reply.message.requestId || '');
       if (!requestId) throw new Error('Bosonoo did not mint a snapshot request.');
       return new Promise(function (resolve, reject) {
@@ -1491,7 +1768,7 @@
     watchVendorConsole();
     // GPU capability is checked before spending the grant; workspace admission
     // uses the broker's account/project identities and precedes all hydration.
-    checkWebGpu().then(connect).then(recoverPending).then(hydrate).then(launchWhenReady).then(null, function (err) {
+    checkWebGpu().then(connect).then(recoverPending).then(hydrate).then(prepareSessionScripts).then(launchWhenReady).then(null, function (err) {
       if (!state.terminal) fail('failed', 'Could not open the file in browser Blender', String(err && err.message || err));
     });
   }

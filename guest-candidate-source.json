@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "status": "unreleased-candidate",
+  "baseNativeRelease": "blender-5.3.0-alpha-20260921",
+  "nativeSourceUnchanged": true,
+  "sources": [
+    {
+      "path": "engine-runtime/pack/blender/guest.html",
+      "bytes": 7077,
+      "sha256": "4e9b4928f62175f20721d17e682a86937a11570417e44f94e09209ae9e5822c6"
+    },
+    {
+      "path": "engine-runtime/pack/blender/guest-primitives.js",
+      "bytes": 6831,
+      "sha256": "d8cbcc6169f5f8d963126b56cb1d3fbab559bd17408a860ddb3cdf81f9106eaf"
+    },
+    {
+      "path": "engine-runtime/pack/blender/guest-resource.js",
+      "bytes": 13134,
+      "sha256": "35f881fcfe58b46be22c13e87f4f91a5ef235407f9de06049357614ff141b037"
+    },
+    {
+      "path": "engine-runtime/pack/blender/guest.js",
+      "bytes": 21449,
+      "sha256": "0429c770f6790a90206acce49732eb0648031037eee461033edc05d386d42a3f"
+    },
+    {
+      "path": "engine-runtime/pack/blender/session.py",
+      "bytes": 8548,
+      "sha256": "d9a34bc50dcb61b8bd6e36e71570ccfa85469056316ed670cf78b150ecdd39da"
+    },
+    {
+      "path": "reproduce_guest_adapter.py",
+      "bytes": 3262,
+      "sha256": "2bbdece99e5ec08f43759f55b68be71b94509a6b6ef546e411f018dbf6da782d"
+    },
+    {
+      "path": "engine-runtime/tests/test_blender_guest.mjs",
+      "bytes": 21714,
+      "sha256": "a0162fd0b90325ccb6b15b60cc0cef9aeb5a17eb37b60045bc0670f52d8ca17c"
+    }
+  ],
+  "reproducedAdapterOutputs": [
+    {
+      "path": "guest.html",
+      "bytes": 7075,
+      "sha256": "785e2bc6960ebba3c9fa5872e1c1aec8d1fc887a3c316b9f3f1d5c2397bcb3d0"
+    },
+    {
+      "path": "bosonoo/guest-primitives.js",
+      "bytes": 6831,
+      "sha256": "d8cbcc6169f5f8d963126b56cb1d3fbab559bd17408a860ddb3cdf81f9106eaf"
+    },
+    {
+      "path": "bosonoo/guest-resource.js",
+      "bytes": 13134,
+      "sha256": "35f881fcfe58b46be22c13e87f4f91a5ef235407f9de06049357614ff141b037"
+    },
+    {
+      "path": "bosonoo/guest.js",
+      "bytes": 21449,
+      "sha256": "0429c770f6790a90206acce49732eb0648031037eee461033edc05d386d42a3f"
+    },
+    {
+      "path": "bosonoo/session.py",
+      "bytes": 8548,
+      "sha256": "d9a34bc50dcb61b8bd6e36e71570ccfa85469056316ed670cf78b150ecdd39da"
+    }
+  ],
+  "qualification": {
+    "adapterTests": "18 Node tests passed locally; includes discard, unknown responses, resume replay and scoped control wire",
+    "reproduction": "Five generated adapter files match retained local guest v4 byte for byte",
+    "nativeBrowser": "Guest v3 open/edit/save/reopen and concurrent file/original preservation accepted locally; new discard v4 awaits native browser acceptance",
+    "hostedRelease": "Not approved or published"
+  }
+}
